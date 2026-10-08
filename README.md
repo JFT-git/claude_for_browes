@@ -6,10 +6,66 @@ Claude видит **IP сервера**, а не клиента. Полезно,
 
 ## Как это работает
 
+```mermaid
+flowchart LR
+    subgraph CLIENT["💻 Клиент — Mac"]
+        A["🌐 Браузер<br/>профиль «Claude»<br/>en-US · UTC · WebRTC off"]
+        B["🧩 Расширение<br/>редирект + basic_auth"]
+        A --- B
+    end
+
+    CF["☁️ Cloudflare<br/>скрывает IP клиента"]
+
+    subgraph SERVER["🖥️ Сервер — DigitalOcean (Amsterdam)"]
+        C["🔐 Caddy<br/>TLS + basic_auth"]
+        D["⚙️ Gateway<br/>подставляет cookies"]
+        E[("🍪 cookies/<br/>alice.json<br/>bob.json")]
+        F["🖥️ Удалённый Chromium<br/>только для логина"]
+        C -->|"X-Remote-User"| D
+        D --- E
+    end
+
+    AI["🤖 claude.ai<br/>видит IP сервера (NL)"]
+
+    B -->|"https://claude.ai"| CF
+    CF --> C
+    D -->|"session-cookies"| AI
+    F -.->|"magic-link"| D
+
+    style AI fill:#4f46e5,color:#fff,stroke:#312e81
+    style CF fill:#f59e0b,color:#fff,stroke:#b45309
+    style D fill:#10b981,color:#fff,stroke:#065f46
+    style C fill:#0ea5e9,color:#fff,stroke:#075985
+    style E fill:#6b7280,color:#fff,stroke:#374151
 ```
-Браузер клиента ──HTTPS──> Cloudflare ──> Сервер (Caddy → Gateway) ──HTTPS──> claude.ai
- (рендерит Claude           (скрывает     (подставляет session-cookies)   (видит IP сервера)
-  нативно, без лагов)        IP клиента)
+
+**Что видит каждая сторона:**
+
+| Сторона | Видит |
+|---|---|
+| Провайдер клиента | только соединение с Cloudflare |
+| Cloudflare | реальный IP клиента |
+| **claude.ai** | **только IP сервера (Amsterdam, NL)** + session-cookies |
+
+### Первый вход пользователя (self-service, без удалённого браузера)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 💻 Клиент
+    participant G as ⚙️ Gateway
+    participant AI as 🤖 claude.ai
+
+    U->>G: открыть claude.ai (cookies пока нет)
+    G->>AI: запрос без cookies
+    AI-->>U: страница логина
+    U->>AI: ввод email
+    AI-->>U: magic-link на почту
+    U->>G: клик по magic-link
+    G->>AI: проверка токена
+    AI-->>G: Set-Cookie (session)
+    Note over G: сохраняет в cookies/user.json<br/>(клиенту не отдаётся)
+    G-->>U: ✅ Claude авторизован
 ```
 
 **Компоненты:**
