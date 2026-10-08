@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Gateway",
+  "version": "1.4.0",
+  "description": "Routes claude.ai through your gateway with injected session cookies.",
+  "permissions": ["declarativeNetRequest", "storage"],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://assets-proxy.anthropic.com/*",
+    "https://api.anthropic.com/*",
+    "https://__GATEWAY_HOST__/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "ruleset_redirect", "enabled": true, "path": "rules.json" }
+    ]
+  }
+}

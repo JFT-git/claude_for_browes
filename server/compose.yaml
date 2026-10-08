@@ -1,0 +1,85 @@
+services:
+  browser:
+    image: lscr.io/linuxserver/chromium:latest
+    restart: unless-stopped
+    shm_size: 512m
+    mem_limit: 1500m
+    mem_reservation: 900m
+    oom_kill_disable: false
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      LC_ALL: en_US.UTF-8
+      # --- latency-optimized selkies ---
+      SELKIES_AUTO_GPU: "false"
+      SELKIES_GPU_ID: "-1"
+      SELKIES_ENCODER: jpeg
+      SELKIES_FRAMERATE: "18"
+      SELKIES_VIDEO_CRF: "28"
+      SELKIES_JPEG_QUALITY: "75"
+      SELKIES_RATE_CONTROL_MODE: crf
+      SELKIES_MANUAL_RESOLUTION: "true"
+      SELKIES_MANUAL_WIDTH: "1280"
+      SELKIES_MANUAL_HEIGHT: "720"
+      SELKIES_BACKPRESSURE_QUEUE_SIZE: "2"
+      SELKIES_KEYFRAME_INTERVAL: "0"
+      SELKIES_AUDIO_ENABLED: "false"
+      # --- clipboard / files ---
+      SELKIES_ENABLE_CLIPBOARD: "true"
+      SELKIES_ENABLE_BINARY_CLIPBOARD: "true"
+      SELKIES_CLIPBOARD_SEAMLESS: "true"
+      SELKIES_FILE_TRANSFERS: upload
+      SELKIES_FILE_MANAGER_PATH: /config/Desktop/Incoming
+      SELKIES_COMMAND_ENABLED: "false"
+      SELKIES_ENABLE_SHARING: "false"
+      SELKIES_UI_SIDEBAR_SHOW_CLIPBOARD: "true"
+      SELKIES_UI_SIDEBAR_SHOW_FILES: "true"
+      SELKIES_UI_SIDEBAR_SHOW_APPS: "false"
+      SELKIES_UI_SIDEBAR_SHOW_SHARING: "false"
+      SELKIES_UI_SIDEBAR_SHOW_VIDEO_SETTINGS: "false"
+      SELKIES_UI_SIDEBAR_SHOW_SCREEN_SETTINGS: "false"
+      SELKIES_UI_SIDEBAR_SHOW_STATS: "false"
+      SELKIES_UI_SIDEBAR_SHOW_GAMEPADS: "false"
+      SELKIES_PRINTING_ENABLED: "false"
+      # --- chromium: lean software rendering, keep en-US ---
+      CHROME_CLI: --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --remote-allow-origins=* --lang=en-US --disable-gpu --disable-gpu-rasterization --disable-smooth-scrolling --disable-features=CalculateNativeWinOcclusion,BackForwardCache,PaintHolding --renderer-process-limit=4 --num-raster-threads=1 https://claude.ai
+      DBUS_SESSION_BUS_ADDRESS: unix:path=/run/attachment-picker/session-bus
+      GTK_USE_PORTAL: "1"
+    volumes:
+    - browser-data:/config
+    - ./attachments/attachment-picker:/opt/attachment-picker:ro
+    - ./keyboard-fix:/opt/keyboard-fix:ro
+    - ./attachments/custom-cont-init.d:/custom-cont-init.d:ro
+    - ./attachments/custom-services.d:/custom-services.d:ro
+  gateway:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "gateway.js"]
+    environment:
+      PORT: "8088"
+      LISTEN: "0.0.0.0"
+      COOKIES_FILE: /browser-data/gateway/cookies/claude.json
+      PUBLIC_HOST: claude.jft-foruse.com
+    volumes:
+    - ./gateway/src:/app:ro
+    - browser-data:/browser-data:ro
+    mem_limit: 256m
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+    - 80:80
+    - 443:443
+    volumes:
+    - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    - caddy-data:/data
+    - caddy-config:/config
+    depends_on:
+    - browser
+    - gateway
+volumes:
+  browser-data: null
+  caddy-data: null
+  caddy-config: null

@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "regexSubstitution": "https://__GATEWAY_HOST__\\1" }
+    },
+    "condition": {
+      "regexFilter": "^https://(?:www\\.)?claude\\.ai(/.*)?$",
+      "resourceTypes": ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"],
+      "excludedInitiatorDomains": ["__GATEWAY_DOMAIN__"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "regexSubstitution": "https://__GATEWAY_HOST__/p/assets.claude.ai\\1" }
+    },
+    "condition": {
+      "regexFilter": "^https://assets\\.claude\\.ai(/.*)?$",
+      "resourceTypes": ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"],
+      "excludedInitiatorDomains": ["__GATEWAY_DOMAIN__"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "regexSubstitution": "https://__GATEWAY_HOST__/p/assets-proxy.anthropic.com\\1" }
+    },
+    "condition": {
+      "regexFilter": "^https://assets-proxy\\.anthropic\\.com(/.*)?$",
+      "resourceTypes": ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"],
+      "excludedInitiatorDomains": ["__GATEWAY_DOMAIN__"]
+    }
+  }
+]

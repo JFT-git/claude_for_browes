@@ -1,0 +1,15 @@
+# Secrets — never commit
+server/Caddyfile
+server/cookies/
+*.json.bak
+cookies/
+*.pem
+*.key
+.env
+
+# OS
+.DS_Store
+
+# Generated
+server/Caddyfile
+node_modules/
