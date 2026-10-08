@@ -1,46 +1,224 @@
 # claude_for_browes
 
-Access the original Claude.ai web interface through a self-hosted gateway. The gateway holds the Claude session cookies server-side and injects them into proxied requests, so the client browser renders Claude natively — no remote-desktop video streaming, no input lag, native clipboard / Russian input / file drag-and-drop.
+Доступ к оригинальному веб-интерфейсу Claude.ai через собственный шлюз. Шлюз хранит session-cookies Claude на сервере и подставляет их в проксируемые запросы, поэтому браузер клиента рендерит Claude **нативно** — без видео-стриминга удалённого рабочего стола, без задержки ввода, с нормальным русским вводом, буфером обмена и drag-and-drop файлов.
 
-Claude sees the **server's IP**, not the client's. Useful when Claude.ai is geo-blocked or you want to keep Claude cookies off the client machine.
+Claude видит **IP сервера**, а не клиента. Полезно, когда claude.ai гео-заблокирован или вы не хотите держать cookies Claude на машине клиента.
 
-## How it works
+## Как это работает
 
 ```
-Client browser ──HTTPS──> Cloudflare ──> Server (Caddy → Gateway) ──HTTPS──> claude.ai
- (renders Claude            (hides        (injects session cookies)      (sees server IP)
-  natively, no lag)         client IP)
+Браузер клиента ──HTTPS──> Cloudflare ──> Сервер (Caddy → Gateway) ──HTTPS──> claude.ai
+ (рендерит Claude           (скрывает     (подставляет session-cookies)   (видит IP сервера)
+  нативно, без лагов)        IP клиента)
 ```
 
-- **Gateway** (Node.js): reverse proxy that injects stored Claude session cookies into requests to `claude.ai`, rewrites HTML/CSS/JS asset URLs and CSP headers so the SPA works through the proxy, and strips the basic_auth header before forwarding (Claude rejects requests carrying both an auth header and a session cookie).
-- **Caddy**: TLS + basic_auth + routing. Asset paths are served without basic_auth (public JS/CSS) to avoid 401 on dynamic `import()`.
-- **Browser extension**: transparently redirects `claude.ai` and its asset hosts to the gateway and adds the basic_auth header.
-- **Remote Chromium** (optional, linuxserver/chromium): used only to log in once via magic-link and extract the session cookies.
+**Компоненты:**
 
-## Repo layout
+- **Gateway** (`gateway/gateway.js`) — Node.js прокси без зависимостей. Подставляет cookies в запросы к `claude.ai`, переписывает URL ассетов и CSP-заголовки (чтобы SPA работала через прокси), удаляет basic_auth-заголовок перед форвардингом (Claude отклоняет запросы, где есть и auth-заголовок, и session-cookie одновременно).
+- **Caddy** — TLS + basic_auth + маршрутизация. Пути ассетов отдаются без basic_auth (публичные JS/CSS), чтобы не было 401 при динамическом `import()`.
+- **Расширение браузера** (`extension/`) — прозрачно редиректит `claude.ai` и его ассет-домены на шлюз и добавляет basic_auth-заголовок.
+- **Удалённый Chromium** (опционально, linuxserver/chromium) — нужен только чтобы один раз залогиниться по magic-link и извлечь session-cookies.
 
-| Path | What |
+## Структура репозитория
+
+| Путь | Что это |
 |---|---|
-| `gateway/gateway.js` | the cookie-injecting proxy (Node, no deps) |
+| `gateway/gateway.js` | прокси с подстановкой cookies (Node, без зависимостей) |
 | `server/compose.yaml` | docker-compose: browser + gateway + caddy |
-| `server/Caddyfile.template` | Caddy config template |
-| `server/extract_cookies.py` | pulls session cookies from the remote Chromium via CDP |
-| `extension/` | Chrome/Edge extension (Manifest V3) |
-| `configure.sh` | fills your domain into the templates |
-| `docs/DEPLOY-SERVER.md` | server setup |
-| `docs/SETUP-CLIENT.md` | client (Mac) setup |
+| `server/Caddyfile.template` | шаблон конфига Caddy |
+| `server/extract_cookies.py` | извлечение session-cookies из удалённого Chromium через CDP |
+| `extension/` | расширение Chrome/Edge (Manifest V3) |
+| `configure.sh` | подставляет ваш домен в шаблоны |
+| `docs/DEPLOY-SERVER.md` | подробная настройка сервера |
+| `docs/SETUP-CLIENT.md` | подробная настройка клиента (Mac) |
 
-## Quick start
+---
+
+# Установка
+
+## Часть 1. Сервер
+
+Нужен сервер с публичным IP в регионе, где доступен claude.ai (например DigitalOcean, Amsterdam). Тестировано на Ubuntu + Docker, 1 vCPU / 2GB RAM.
+
+### Шаг 1. Установите Docker
 
 ```sh
-./configure.sh claude.example.com   # your gateway domain
+curl -fsSL https://get.docker.com | sh
 ```
 
-Then follow `docs/DEPLOY-SERVER.md` (server) and `docs/SETUP-CLIENT.md` (each client).
+### Шаг 2. Склонируйте репозиторий на сервер
 
-## Security notes
+```sh
+git clone git@github.com:JFT-git/claude_for_browes.git /root/claude-browser
+cd /root/claude-browser
+```
 
-- Session cookies live only on the server (`server/cookies/`, gitignored). Never commit them.
-- The basic_auth hash is set in `server/Caddyfile` (generated, gitignored), not in the template.
-- The gateway strips `Authorization`/`Proxy-Authorization` before forwarding upstream and never logs cookie values.
-- Keep the client browser profile in English (US) + UTC with WebRTC off for a clean fingerprint.
+### Шаг 3. Подставьте ваш домен
+
+```sh
+./configure.sh claude.example.com
+```
+
+Это заполнит домен в `extension/` и создаст `server/Caddyfile` из шаблона.
+
+### Шаг 4. Задайте basic_auth
+
+Отредактируйте `server/Caddyfile` — замените плейсхолдеры:
+- `__BASIC_AUTH_USER__` — имя пользователя (например `owner`)
+- `__BASIC_AUTH_HASH__` — хэш пароля. Сгенерируйте:
+
+```sh
+docker run --rm caddy:2 caddy hash-password --plaintext 'ваш-пароль'
+```
+
+Вставьте результат вместо `__BASIC_AUTH_HASH__`.
+
+### Шаг 5. Разложите файлы по местам
+
+На сервере должна получиться такая структура:
+
+```
+/root/claude-browser/
+├── compose.yaml              ← из server/compose.yaml
+├── Caddyfile                 ← сгенерирован и отредактирован (шаг 3-4)
+├── gateway/
+│   ├── src/gateway.js        ← из gateway/gateway.js
+│   └── cookies/              ← сюда попадут session-cookies
+└── extract_cookies.py        ← из server/extract_cookies.py
+```
+
+```sh
+cp server/compose.yaml ./compose.yaml
+mkdir -p gateway/src gateway/cookies
+cp gateway/gateway.js gateway/src/gateway.js
+cp server/extract_cookies.py ./extract_cookies.py
+```
+
+### Шаг 6. DNS / Cloudflare
+
+Направьте `claude.example.com` на IP сервера.
+
+**Рекомендуется Cloudflare** (скрывает origin и сглаживает обрывы соединения на уровне провайдера):
+1. Добавьте запись A: `claude` → IP сервера
+2. Включите **Proxied** (оранжевое облако)
+3. SSL/TLS → режим **Full**
+
+### Шаг 7. Запустите
+
+```sh
+cd /root/claude-browser
+docker compose up -d
+```
+
+Поднимутся три контейнера: `browser` (удалённый Chromium), `gateway`, `caddy`.
+
+### Шаг 8. Залогиньтесь в Claude и извлеките cookies
+
+Шлюзу нужны валидные session-cookies Claude. Проще всего — через встроенный удалённый Chromium:
+
+1. Откройте `https://claude.example.com/desktop/` (введите basic_auth) — это удалённый браузер
+2. Залогиньтесь в claude.ai по magic-link
+3. На сервере извлеките cookies в хранилище шлюза:
+
+```sh
+docker exec claude-browser-browser-1 /lsiopy/bin/pip3 install --quiet websocket-client
+docker cp extract_cookies.py claude-browser-browser-1:/tmp/extract_cookies.py
+docker exec claude-browser-browser-1 /lsiopy/bin/python3 /tmp/extract_cookies.py
+```
+
+Скрипт выводит только сводку (количество/домены) — никогда не значения cookies.
+
+4. Шлюз подхватит cookies автоматически в течение ~15 секунд.
+
+### Шаг 9. Проверьте
+
+```sh
+curl -u owner:ваш-пароль https://claude.example.com/api/bootstrap
+# → 200 и JSON с данными аккаунта
+```
+
+Если 200 — сервер готов.
+
+---
+
+## Часть 2. Клиент (Mac)
+
+Настройка на машине каждого клиента. ~5 минут.
+
+### Что выдать клиенту
+
+- Папку `extension/` (уже настроенную через `configure.sh`)
+- Gateway host (например `claude.example.com`)
+- Его basic_auth **user** и **password**
+
+### Шаг 1. Создайте отдельный профиль браузера
+
+1. Chrome → значок профиля (правый верх) → **Добавить**
+2. Назовите, например, «Claude»
+3. **Не** входите в Google-аккаунт в этом профиле
+
+### Шаг 2. Чистый отпечаток (чтобы Claude не видел реальный регион)
+
+В этом профиле:
+
+1. **Язык:** `chrome://settings/languages` → переместите **English (United States)** наверх
+2. **Часовой пояс UTC:** установите расширение смены часового пояса (например «Change Timezone») и выставьте **UTC**
+3. **WebRTC off:** `chrome://flags/#disable-webrtc` → Enabled (или расширение WebRTC Control)
+4. **Геолокация off:** `chrome://settings/content/location` → не разрешать
+
+### Шаг 3. Установите расширение
+
+1. Откройте `chrome://extensions`
+2. Включите **Режим разработчика** (правый верх)
+3. **Загрузить распакованное расширение** → выберите папку `extension/`
+4. Откройте **Options** расширения (Details → Extension options)
+5. Введите:
+   - **Gateway host:** например `claude.example.com`
+   - **User / Password:** basic_auth-креды клиента
+6. **Save**
+
+### Шаг 4. Пользуйтесь Claude
+
+Откройте `https://claude.ai` в этом профиле. Он загрузится через шлюз с уже авторизованной сессией.
+
+- Печатайте по-русски, вставляйте текст/ссылки, перетаскивайте файлы — всё нативно, без лагов
+- Claude видит IP сервера, не ваш
+
+---
+
+# Диагностика проблем
+
+| Симптом | Решение |
+|---|---|
+| Зацикленное окно логина браузера | Заново введите креды в Options расширения, затем обновите расширение (⟳ на `chrome://extensions`) |
+| Claude просит логин | Cookies протухли — переизвлеките (Часть 1, шаг 8) |
+| Шрифты сломаны | Hard reload: ⌘+Shift+R |
+| Страница частично грузится / таймауты | Сеть клиента обрывает соединение — попробуйте другую сеть или убедитесь, что настроен Cloudflare (Часть 1, шаг 6) |
+| 401 на `/v1/code/*` или ассетах | Убедитесь, что gateway обновлён (удаляет `authorization` перед форвардингом) |
+
+---
+
+# Обновление cookies (когда сессия истечёт)
+
+Когда Claude начнёт возвращать 401 (сессия протухла), повторите Часть 1, шаг 8 (логин в удалённом браузере + извлечение cookies). Шлюз подхватит новые cookies сам за ~15 секунд.
+
+---
+
+# Несколько клиентов (multi-client)
+
+Из коробки шлюз держит **один** набор cookies (один Claude-аккаунт). Чтобы каждый клиент использовал **свой** аккаунт:
+
+- храните cookies по пользователям (`cookies/<user>.json`)
+- добавьте по basic_auth-пользователю на клиента в Caddy
+- сделайте так, чтобы gateway выбирал cookie-файл по авторизованному basic_auth-пользователю
+
+(Один пользователь работает из коробки; маршрутизация cookies per-user — небольшая доработка gateway.)
+
+---
+
+# Безопасность
+
+- Session-cookies хранятся только на сервере (`gateway/cookies/`, в .gitignore). Никогда не коммитьте их.
+- Хэш basic_auth задаётся в `server/Caddyfile` (генерируется, в .gitignore), а не в шаблоне.
+- Gateway удаляет `Authorization`/`Proxy-Authorization` перед форвардингом и не логирует значения cookies.
+- Держите профиль клиента на English (US) + UTC с выключенным WebRTC для чистого отпечатка.
