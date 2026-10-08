@@ -25,12 +25,14 @@ Claude видит **IP сервера**, а не клиента. Полезно,
 |---|---|
 | `gateway/gateway.js` | прокси с подстановкой cookies (Node, без зависимостей) |
 | `server/compose.yaml` | docker-compose: browser + gateway + caddy |
-| `server/Caddyfile.template` | шаблон конфига Caddy |
+| `server/Caddyfile.template` | шаблон конфига Caddy (multi-user basic_auth) |
+| `server/add-user.sh` | добавить пользователя (basic_auth + cookie-слот) |
 | `server/extract_cookies.py` | извлечение session-cookies из удалённого Chromium через CDP |
 | `extension/` | расширение Chrome/Edge (Manifest V3) |
 | `configure.sh` | подставляет ваш домен в шаблоны |
 | `docs/DEPLOY-SERVER.md` | подробная настройка сервера |
 | `docs/SETUP-CLIENT.md` | подробная настройка клиента (Mac) |
+| `docs/MULTI-USER.md` | несколько пользователей + расчёт ёмкости |
 
 ---
 
@@ -206,13 +208,16 @@ curl -u owner:ваш-пароль https://claude.example.com/api/bootstrap
 
 # Несколько клиентов (multi-client)
 
-Из коробки шлюз держит **один** набор cookies (один Claude-аккаунт). Чтобы каждый клиент использовал **свой** аккаунт:
+Шлюз **из коробки** обслуживает много пользователей, у каждого свой Claude-аккаунт и свои cookies:
 
-- храните cookies по пользователям (`cookies/<user>.json`)
-- добавьте по basic_auth-пользователю на клиента в Caddy
-- сделайте так, чтобы gateway выбирал cookie-файл по авторизованному basic_auth-пользователю
+- cookies хранятся по пользователям (`gateway/cookies/<user>.json`)
+- на каждого клиента — свой basic_auth-пользователь в Caddy
+- gateway выбирает cookie-файл по авторизованному basic_auth-пользователю (заголовок `X-Remote-User`)
+- пользователь логинится сам через шлюз (magic-link) — шлюз перехватывает его cookies
 
-(Один пользователь работает из коробки; маршрутизация cookies per-user — небольшая доработка gateway.)
+Добавить пользователя: `./server/add-user.sh <имя> <пароль>`
+
+**Подробно + расчёт ёмкости сервера: [docs/MULTI-USER.md](docs/MULTI-USER.md)**
 
 ---
 

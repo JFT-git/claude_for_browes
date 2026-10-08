@@ -3,16 +3,18 @@
 }
 
 # Replace __DOMAIN__ with your domain (e.g. claude.example.com)
-# Replace __BASIC_AUTH_HASH__ with: caddy hash-password --plaintext 'yourpassword'
+# Add one basic_auth line per user. Generate a hash with:
+#   docker run --rm caddy:2 caddy hash-password --plaintext 'the-password'
 __DOMAIN__ {
     # Public asset proxy path: NO basic_auth (assets are public JS/CSS/fonts).
-    # This avoids 401 on dynamic import() where the browser does not send Authorization.
+    # Avoids 401 on dynamic import() where the browser does not send Authorization.
     @assets path /p/assets-proxy.anthropic.com/* /p/assets.claude.ai/*
     handle @assets {
         reverse_proxy gateway:8088
     }
 
-    # Everything else requires basic_auth
+    # Everything else requires basic_auth. The authenticated username is passed
+    # to the gateway via X-Remote-User so it can pick that user's cookie file.
     route {
         header {
             >Strict-Transport-Security "max-age=31536000"
@@ -22,13 +24,15 @@ __DOMAIN__ {
             -Server
         }
         basic_auth {
+            # one line per user:  username  bcrypt-hash
             __BASIC_AUTH_USER__ __BASIC_AUTH_HASH__
         }
         @desktop path /desktop /desktop/*
         reverse_proxy @desktop browser:3000
-        @proxy path /p /p/*
-        reverse_proxy @proxy gateway:8088
-        reverse_proxy gateway:8088
+
+        reverse_proxy gateway:8088 {
+            header_up X-Remote-User {http.auth.user.id}
+        }
     }
 
     handle_errors 401 {

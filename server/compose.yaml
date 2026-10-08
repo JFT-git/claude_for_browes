@@ -60,11 +60,14 @@ services:
     environment:
       PORT: "8088"
       LISTEN: "0.0.0.0"
-      COOKIES_FILE: /browser-data/gateway/cookies/claude.json
-      PUBLIC_HOST: claude.jft-foruse.com
+      # directory holding one cookie file per user: <user>.json
+      COOKIES_DIR: /cookies
+      # set your public gateway domain (configure.sh fills this)
+      PUBLIC_HOST: ${PUBLIC_HOST:-claude.example.com}
     volumes:
     - ./gateway/src:/app:ro
-    - browser-data:/browser-data:ro
+    # writable: the gateway captures session cookies here on user login
+    - ./gateway/cookies:/cookies
     mem_limit: 256m
   caddy:
     image: caddy:2
