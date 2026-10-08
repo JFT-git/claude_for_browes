@@ -56,27 +56,33 @@ docker compose up -d
 
 This starts three containers: `browser` (remote Chromium), `gateway`, `caddy`.
 
-## 6. Log in to Claude & extract cookies
+## 6. Add users
 
-The gateway needs valid Claude session cookies. The easiest way is the bundled remote Chromium:
+The gateway is multi-user: each user gets their own Claude account and cookie file.
 
-1. Open `https://claude.example.com/desktop/` (basic_auth) — the remote browser
-2. Log in to claude.ai with the magic link
-3. On the server, extract the cookies into the gateway store:
-   ```sh
-   docker exec claude-browser-browser-1 /lsiopy/bin/pip3 install --quiet websocket-client
-   docker cp gateway/extract_cookies.py claude-browser-browser-1:/tmp/extract_cookies.py
-   docker exec claude-browser-browser-1 /lsiopy/bin/python3 /tmp/extract_cookies.py
-   ```
-   The script prints only a summary (count/domains) — never cookie values.
-4. The gateway picks up the cookies automatically within ~15s.
-
-Verify:
 ```sh
-curl -u user:pass https://claude.example.com/api/bootstrap   # → 200 JSON
+./server/add-user.sh alice 'her-password'
+./server/add-user.sh bob 'his-password'
 ```
 
-## 7. Hand out to clients
+This adds a basic_auth credential to `Caddyfile`, creates a cookie slot `gateway/cookies/<user>.json`, and restarts Caddy.
+
+## 7. Users log in themselves (self-service)
+
+No remote browser needed for users. Each user:
+
+1. Installs the extension, enters their host + user + pass in Options
+2. Opens `https://claude.ai` → sees the Claude login page (no cookies yet)
+3. Enters their email → clicks the magic-link from their inbox
+4. Claude sets session cookies → the gateway **captures** them into `cookies/<user>.json`
+5. Done — they're authenticated
+
+Verify a user is captured:
+```sh
+curl -u alice:her-password https://claude.example.com/api/bootstrap   # → 200 JSON
+```
+
+## 8. Hand out to clients
 
 Give each client:
 - the `extension/` folder (already configured by `configure.sh`)
@@ -85,13 +91,21 @@ Give each client:
 
 ## Updating cookies later
 
-When a session expires (gateway starts returning 401 from claude.ai), re-run step 6.
+Sessions are long-lived. If a user's session expires (gateway returns 401 from claude.ai for them), they just log in again through the gateway (step 7) — cookies are re-captured automatically.
 
 ## Multi-client
 
-The current gateway holds one cookie set. To serve many clients each with their own Claude account:
-- store cookies per user (`cookies/<user>.json`)
-- add a basic_auth user per client in Caddy
-- make the gateway pick the cookie file by the authenticated basic_auth user
+Multi-user works out of the box. See [MULTI-USER.md](MULTI-USER.md) for architecture and server capacity calculations.
 
-(Single-user works out of the box; per-user cookie routing is a small gateway change.)
+### Alternative: shared remote-browser login
+
+If you prefer to extract cookies from the bundled remote Chromium (e.g. for a single shared account), use `server/extract_cookies.py`:
+
+```sh
+docker exec claude-browser-browser-1 /lsiopy/bin/pip3 install --quiet websocket-client
+docker cp server/extract_cookies.py claude-browser-browser-1:/tmp/extract_cookies.py
+docker exec -e COOKIES_DIR=/config/gateway/cookies claude-browser-browser-1 \
+  /lsiopy/bin/python3 /tmp/extract_cookies.py <username>
+```
+
+The script prints only a summary (count/domains) — never cookie values.
