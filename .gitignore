@@ -13,3 +13,7 @@ cookies/
 # Generated
 server/Caddyfile
 node_modules/
+
+# Python
+__pycache__/
+*.pyc
