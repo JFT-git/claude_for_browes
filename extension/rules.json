@@ -37,5 +37,18 @@
       "resourceTypes": ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"],
       "excludedInitiatorDomains": ["__GATEWAY_DOMAIN__"]
     }
+  },
+  {
+    "id": 4,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "regexSubstitution": "https://__GATEWAY_HOST__/p/api.anthropic.com\\1" }
+    },
+    "condition": {
+      "regexFilter": "^https://api\\.anthropic\\.com(/.*)?$",
+      "resourceTypes": ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"],
+      "excludedInitiatorDomains": ["__GATEWAY_DOMAIN__"]
+    }
   }
 ]

@@ -30,8 +30,8 @@ const PUBLIC_HOST = process.env.PUBLIC_HOST || "claude.example.com";
 const FIXED_UA = process.env.FIXED_UA || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 const UPSTREAM_TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || "30000", 10);
 
-const ALLOWED_HOSTS = new Set(["claude.ai", "www.claude.ai", "assets.claude.ai", "assets-proxy.anthropic.com"]);
-const COOKIE_HOSTS = new Set(["claude.ai", "www.claude.ai"]);
+const ALLOWED_HOSTS = new Set(["claude.ai", "www.claude.ai", "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com"]);
+const COOKIE_HOSTS = new Set(["claude.ai", "www.claude.ai", "api.anthropic.com"]);
 
 // ---- per-user cookie store with mtime cache ----
 // cache: user -> { mtime, header, cookies: Map(name->cookieObj) }

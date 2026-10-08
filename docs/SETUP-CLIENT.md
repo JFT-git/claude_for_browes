@@ -1,59 +1,72 @@
-# Client setup (Mac)
+# Настройка клиента (Mac)
 
-Set this up on each client's machine. ~5 minutes.
+Настройка на машине каждого клиента. ~5 минут.
 
-## What you need from your administrator
+## Что нужно получить у администратора
 
-- The `extension/` folder (already configured for the gateway domain)
-- Gateway host (e.g. `claude.example.com`)
-- Your basic_auth **user** and **password**
+- Папку `extension/` (уже настроенную под домен шлюза)
+- Gateway host (например `claude.example.com`)
+- Ваши basic_auth **user** и **password**
 
-## 1. Create a dedicated browser profile
+## 1. Создайте отдельный профиль браузера
 
-Use a separate Chrome/Edge profile so your main browser is untouched:
+Чтобы не трогать основной браузер:
 
-1. Chrome → profile icon (top right) → **Add**
-2. Name it e.g. "Claude"
-3. Do **not** sign into a Google account in this profile
+1. Chrome → значок профиля (правый верх) → **Добавить**
+2. Назовите, например, «Claude»
+3. **Не** входите в Google-аккаунт в этом профиле
 
-## 2. Clean fingerprint (so Claude doesn't see your real region)
+## 2. Чистый отпечаток (чтобы Claude не видел реальный регион)
 
-In this profile:
+В этом профиле:
 
-1. **Language:** `chrome://settings/languages` → move **English (United States)** to the top
-2. **Timezone UTC:** install a timezone-override extension (e.g. "Change Timezone") and set **UTC**
-3. **WebRTC off:** `chrome://flags/#disable-webrtc` → Enabled (or a WebRTC-control extension)
-4. **Geolocation off:** `chrome://settings/content/location` → don't allow
+1. **Язык:** `chrome://settings/languages` → переместите **English (United States)** наверх
+2. **Часовой пояс UTC:** установите расширение смены часового пояса (например «Change Timezone») и выставьте **UTC**
+3. **WebRTC off:** `chrome://flags/#disable-webrtc` → Enabled (или расширение WebRTC Control)
+4. **Геолокация off:** `chrome://settings/content/location` → не разрешать
 
-## 3. Install the extension
+## 3. Установите расширение
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode** (top right)
-3. **Load unpacked** → select the `extension/` folder
-4. Open the extension's **Options** (Details → Extension options)
-5. Enter:
-   - **Gateway host:** e.g. `claude.example.com`
-   - **User / Password:** your basic_auth credentials
+1. Откройте `chrome://extensions`
+2. Включите **Режим разработчика** (правый верх)
+3. **Загрузить распакованное расширение** → выберите папку `extension/`
+4. При первой установке автоматически откроется страница настроек. Если нет — откройте её: значок расширения → **Settings**
+5. Введите:
+   - **Gateway host:** например `claude.example.com`
+   - **User / Password:** ваши basic_auth-креды
 6. **Save**
 
-## 4. Use Claude
+## 4. Проверьте соединение
 
-Open `https://claude.ai` in this profile. It loads through the gateway with your session already authenticated.
+Кликните по **значку расширения** на панели инструментов — откроется попап со статусом:
 
-- Type in Russian, paste text/links, drag-and-drop files — all native, no lag
-- Claude sees the server's IP, not yours
+- 🟢 **Connected** — всё работает
+- 🔴 **Auth failed** — неверный user/password (проверьте в Settings)
+- 🔴 **Gateway unreachable** — шлюз недоступен (сеть/сервер)
+- 🟡 **Not configured** — не заполнены настройки
 
-## Troubleshooting
+Кнопки: **Test connection** — перепроверить, **Open Claude** — открыть claude.ai, **Settings** — настройки.
 
-| Symptom | Fix |
+## 5. Пользуйтесь Claude
+
+Откройте `https://claude.ai` в этом профиле. Он загрузится через шлюз с уже авторизованной сессией.
+
+- Печатайте по-русски, вставляйте текст/ссылки, перетаскивайте файлы — всё нативно, без лагов
+- Claude видит IP сервера, не ваш
+
+## Диагностика
+
+| Симптом | Решение |
 |---|---|
-| Browser login popup loops | Re-enter credentials in the extension Options, then reload the extension (⟳) |
-| Asks to log in to Claude | Session cookies expired — ask the admin to re-extract cookies (DEPLOY-SERVER.md step 6) |
-| Fonts look wrong | Hard reload: ⌘+Shift+R |
-| Page partially loads / times out | Your network may be resetting the connection — try another network or ask the admin about the Cloudflare setup |
+| Зацикленное окно логина браузера | Заново введите креды в Settings, обновите расширение (⟳ на `chrome://extensions`) |
+| Попап: Auth failed | Неверный user/password — уточните у администратора |
+| Попап: Gateway unreachable | Шлюз недоступен — проверьте сеть или спросите администратора |
+| Claude просит логин | Cookies протухли — попросите администратора переизвлечь cookies (DEPLOY-SERVER.md) |
+| Шрифты сломаны | Hard reload: ⌘+Shift+R |
+| Страница частично грузится / таймауты | Сеть обрывает соединение — попробуйте другую сеть или убедитесь, что настроен Cloudflare |
 
-## Don't
+## Не делайте
 
-- Don't open claude.ai outside this profile (it would use your real IP)
-- Don't set Russian as the profile language
-- Don't disable the extension while working
+- Не открывайте claude.ai вне этого профиля (будет ваш реальный IP)
+- Не ставьте русский язык профиля
+- Не отключайте расширение во время работы
