@@ -15,7 +15,11 @@ async function refresh() {
   setState("unknown", "Checking…");
   chrome.runtime.sendMessage({ type: "health" }, (res) => {
     if (chrome.runtime.lastError || !res) { setState("bad", "Error"); return; }
-    if (res.ok) setState("ok", "Connected" + (typeof res.users === "number" ? " · " + res.users + " user(s)" : ""));
+    if (res.ok) {
+      if (res.session === "expired") setState("warn", "Connected · Claude session expired — sign in again");
+      else if (res.session === "none") setState("warn", "Connected · not signed in to Claude yet — open Claude and sign in");
+      else setState("ok", "Connected · Claude session OK");
+    }
     else if (res.reason === "wrong_build") setState("bad", "Wrong build: extension is not configured for " + host + (res.built ? " (built for " + res.built + ")" : " (unconfigured package)") + ". Use configure-prebuilt.sh <browser> " + host);
     else if (res.reason === "auth_failed") setState("bad", "Auth failed — check credentials");
     else if (res.reason === "unreachable") setState("bad", "Gateway unreachable");

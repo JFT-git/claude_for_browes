@@ -1,11 +1,27 @@
 {
     admin off
+    servers {
+        # Real client IP behind Cloudflare (used for brute-force protection).
+        # If you do not use Cloudflare these ranges are simply never matched.
+        trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+        client_ip_headers CF-Connecting-IP
+    }
 }
 
 # Replace __DOMAIN__ with your domain (e.g. claude.example.com)
-# Add one basic_auth line per user. Generate a hash with:
+# Add one basic_auth line per user (use ./add-user.sh). Hash generator:
 #   docker run --rm caddy:2 caddy hash-password --plaintext 'the-password'
 __DOMAIN__ {
+    # gzip/zstd for everything compressible (the gateway talks to Claude uncompressed
+    # so it can rewrite URLs; compression for the client happens here).
+    encode zstd gzip
+
+    # Internal gateway endpoints (brute-force protection) must never be reachable from outside.
+    @internal path /__ban-check /__authfail
+    handle @internal {
+        respond 404
+    }
+
     # Public asset proxy path: NO basic_auth (assets are public JS/CSS/fonts).
     # Avoids 401 on dynamic import() where the browser does not send Authorization.
     @assets path /p/assets-proxy.anthropic.com/* /p/assets.claude.ai/*
@@ -26,6 +42,12 @@ __DOMAIN__ {
             >Referrer-Policy "strict-origin-when-cross-origin"
             -Server
         }
+        # 1) Is this IP banned? (asked BEFORE any password is checked)
+        forward_auth gateway:8088 {
+            uri /__ban-check
+            header_up X-Client-IP {client_ip}
+        }
+        # 2) Password check
         basic_auth {
             # one line per user:  username  bcrypt-hash
             __BASIC_AUTH_USER__ __BASIC_AUTH_HASH__
@@ -35,14 +57,18 @@ __DOMAIN__ {
         }
     }
 
+    # 3) Every failed password attempt is reported to the gateway (ban after N failures).
     handle_errors 401 {
         header {
             Strict-Transport-Security "max-age=31536000"
             X-Content-Type-Options "nosniff"
             X-Frame-Options "DENY"
-            Referrer-Policy "strict-origin-when-cross-origin"
             -Server
         }
-        respond "" 401
+        rewrite * /__authfail
+        reverse_proxy gateway:8088 {
+            method POST
+            header_up X-Client-IP {client_ip}
+        }
     }
 }

@@ -11,10 +11,17 @@ services:
       COOKIES_DIR: /cookies
       # set your public gateway domain (configure.sh fills this)
       PUBLIC_HOST: ${PUBLIC_HOST:-claude.example.com}
+      # values come from .env next to this file (created by install.sh)
+      COOKIES_KEY: ${COOKIES_KEY:-}
+      ADMIN_USERS: ${ADMIN_USERS:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     volumes:
       - ./gateway/src:/app:ro
       # writable: the gateway stores each user's session cookies here
       - ./gateway/cookies:/cookies
+      # ready-made browser extension packages served at /__ext/ (behind basic_auth)
+      - ./extension:/ext:ro
     # hardening: no extra privileges, read-only root fs, no published ports
     # (reachable only from caddy over the internal docker network)
     read_only: true

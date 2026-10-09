@@ -65,7 +65,7 @@ async function healthCheck() {
     clearTimeout(t);
     if (res.status === 200) {
       const body = await res.json().catch(() => ({}));
-      return { ok: true, status: 200, users: body.users };
+      return { ok: true, status: 200, users: body.users, session: body.session };
     }
     if (res.status === 401) return { ok: false, status: 401, reason: "auth_failed" };
     return { ok: false, status: res.status, reason: "http_" + res.status };

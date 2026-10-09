@@ -18,6 +18,8 @@
 
 ## 2. Установите расширение
 
+Скачайте готовый пакет со страницы `https://<домен-шлюза>/__ext/` (спросит логин/пароль, которые выдал администратор) — он уже настроен на нужный домен. Дальше:
+
 **Chrome / Edge:** `chrome://extensions` → **Режим разработчика** → **Загрузить распакованное расширение** → `extension/dist/chrome`.
 
 **Firefox (≥ 128):** `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → `extension/dist/firefox/manifest.json` (после перезапуска Firefox нужно загрузить заново; для постоянной установки подпишите zip на addons.mozilla.org как unlisted).

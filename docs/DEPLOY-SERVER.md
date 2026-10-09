@@ -60,8 +60,9 @@ This starts two containers: `gateway` and `caddy`.
 The gateway is multi-user: each user gets their own Claude account and cookie file.
 
 ```sh
-./server/add-user.sh alice 'her-password'
-./server/add-user.sh bob 'his-password'
+./add-user.sh alice                 # random strong password, shown once
+./add-user.sh bob 'his-long-password'  # or set your own (min 12 chars); re-run to change it
+./remove-user.sh bob
 ```
 
 This adds a basic_auth credential to `Caddyfile`, creates a cookie slot `gateway/cookies/<user>.json`, and restarts Caddy.
@@ -95,3 +96,19 @@ Sessions are long-lived. If a user's session expires (gateway returns 401 from c
 ## Multi-client
 
 Multi-user works out of the box. See [MULTI-USER.md](MULTI-USER.md) for architecture and server capacity calculations.
+
+## Recommended: use `install.sh`
+
+`bash install.sh` in the repo root does all of the above interactively (domain, first user, secrets in `.env`,
+encrypted cookies, daily encrypted backups, extension build) and serves the ready-made extension to your users at
+`https://<domain>/__ext/` (behind basic_auth).
+
+## Operations
+
+| Task | Command (in the deploy dir) |
+|---|---|
+| Session status of all users | `curl -u <admin> https://<domain>/__admin/status` |
+| Backup now | `./backup.sh` (daily via cron; key in `/root/.claude-gateway-backup.key` — **keep a copy off the server**) |
+| Restore | `./restore.sh backups/state-<date>.tar.gz.enc` |
+| Telegram alerts | set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `.env`, then `docker compose up -d` |
+| Update gateway | copy new `gateway/gateway.js` to `gateway/src/gateway.js`, `docker compose restart gateway` |

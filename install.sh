@@ -29,7 +29,7 @@ ask()  { # ask <var> <prompt> [default]
 ask_secret() { local v="$1" p="$2"; read -r -s -p "${B}$p${N}: " "$v" || true; echo; }
 confirm() { local a; read -r -p "${B}$1${N} [Y/n]: " a || true; case "${a:-Y}" in [Yy]*) return 0;; *) return 1;; esac; }
 
-TOTAL=8
+TOTAL=9
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
@@ -42,6 +42,12 @@ step 1 "Проверка окружения"
 command -v docker >/dev/null 2>&1 || die "docker не найден. Установите: https://docs.docker.com/engine/install/"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin не найден."
 command -v curl >/dev/null 2>&1 || die "curl не найден."
+command -v openssl >/dev/null 2>&1 || die "openssl не найден (нужен для ключей и бэкапов)."
+if ! command -v zip >/dev/null 2>&1; then
+  warn "zip не найден — нужен для сборки расширения."
+  if command -v apt-get >/dev/null 2>&1 && confirm "Установить zip через apt?"; then apt-get install -y zip >/dev/null; fi
+  command -v zip >/dev/null 2>&1 || die "Установите zip и запустите install.sh снова."
+fi
 ok "docker $(docker --version | grep -oE '[0-9.]+' | head -1), compose, curl — на месте"
 docker info >/dev/null 2>&1 || die "docker daemon не отвечает (нужны права root или группа docker)."
 ok "docker daemon работает"
@@ -58,12 +64,12 @@ ok "Домен: $DOMAIN"
 # ------------------------------------------- Шаг 3: первый пользователь ------
 step 3 "Первый пользователь (basic_auth)"
 echo "Логин/пароль для доступа к шлюзу (это НЕ аккаунт Claude — а доступ к вашему шлюзу)."
-echo "Пароль хранится только в виде bcrypt-хэша в Caddyfile."
+echo "Пароль хранится только в виде bcrypt-хэша в Caddyfile. Минимум 12 символов."
 ask ADMIN_USER "Имя пользователя" "owner"
 echo "$ADMIN_USER" | grep -qE '^[a-zA-Z0-9._-]+$' || die "Имя: только буквы, цифры, точка, дефис, подчёркивание."
 while :; do
   ask_secret ADMIN_PASS "Пароль для $ADMIN_USER"
-  [ -n "$ADMIN_PASS" ] || { warn "Пароль пустой — повторите."; continue; }
+  [ "${#ADMIN_PASS}" -ge 12 ] || { warn "Слишком короткий пароль (минимум 12 символов) — повторите."; continue; }
   ask_secret ADMIN_PASS2 "Повторите пароль"
   [ "$ADMIN_PASS" = "$ADMIN_PASS2" ] && break
   warn "Пароли не совпадают — повторите."
@@ -83,6 +89,16 @@ grep -q "__BASIC_AUTH" server/Caddyfile && die "Плейсхолдеры basic_a
 ok "Caddyfile настроен, хэш сгенерирован"
 unset ADMIN_PASS ADMIN_PASS2
 
+echo
+echo "Секреты и уведомления (хранятся в .env на сервере, не в репозитории)."
+COOKIES_KEY=$(openssl rand -hex 32)
+ok "Сгенерирован ключ шифрования cookies на диске (AES-256-GCM)"
+echo "Telegram-алерты (истёкшая сессия пользователя, блокировка IP) — необязательно."
+echo "Создайте бота у @BotFather, узнайте chat id у @userinfobot. Пустой ввод — пропустить."
+ask TG_TOKEN "TELEGRAM_BOT_TOKEN" ""
+TG_CHAT=""
+[ -z "$TG_TOKEN" ] || ask TG_CHAT "TELEGRAM_CHAT_ID" ""
+
 # ------------------------------------------- Шаг 5: сборка каталога деплоя ---
 step 5 "Сборка каталога деплоя"
 ask DEPLOY_DIR "Куда установить сервер" "/root/claude-browser"
@@ -90,15 +106,49 @@ mkdir -p "$DEPLOY_DIR/gateway/src" "$DEPLOY_DIR/gateway/cookies"
 cp server/compose.yaml "$DEPLOY_DIR/compose.yaml"
 cp server/Caddyfile   "$DEPLOY_DIR/Caddyfile"
 cp gateway/gateway.js "$DEPLOY_DIR/gateway/src/gateway.js"
-cp server/add-user.sh "$DEPLOY_DIR/add-user.sh"
-chmod +x "$DEPLOY_DIR/add-user.sh"
+cp server/add-user.sh server/remove-user.sh server/backup.sh server/restore.sh "$DEPLOY_DIR/"
+chmod +x "$DEPLOY_DIR"/*.sh
+mkdir -p "$DEPLOY_DIR/extension"
+cp extension/dist/claude-gateway-chrome.zip extension/dist/claude-gateway-firefox.zip "$DEPLOY_DIR/extension/" \
+  || die "Не найдены собранные расширения (extension/dist/*.zip)."
+ok "Расширения (Chrome, Firefox) под $DOMAIN будут доступны пользователям на https://$DOMAIN/__ext/"
+umask 077
+{
+  echo "PUBLIC_HOST=$DOMAIN"
+  echo "COOKIES_KEY=$COOKIES_KEY"
+  echo "ADMIN_USERS=$ADMIN_USER"
+  echo "TELEGRAM_BOT_TOKEN=$TG_TOKEN"
+  echo "TELEGRAM_CHAT_ID=$TG_CHAT"
+} > "$DEPLOY_DIR/.env"
+umask 022
+chmod 600 "$DEPLOY_DIR/.env"
+ok ".env записан (права 600)"
 chmod 700 "$DEPLOY_DIR/gateway/cookies"
 [ -f "$DEPLOY_DIR/gateway/cookies/$ADMIN_USER.json" ] || echo '{"cookies":[]}' > "$DEPLOY_DIR/gateway/cookies/$ADMIN_USER.json"
 chmod 600 "$DEPLOY_DIR/gateway/cookies/$ADMIN_USER.json"
 ok "Файлы в $DEPLOY_DIR"
 
-# ------------------------------------------- Шаг 6: проверка DNS -------------
-step 6 "Проверка DNS"
+# ------------------------------------------- Шаг 6: резервные копии ----------
+step 6 "Резервные копии"
+echo "Ежедневный зашифрованный бэкап: сессии пользователей, Caddyfile, .env (хранится 14 копий)."
+BACKUP_KEY_FILE="${BACKUP_KEY_FILE:-/root/.claude-gateway-backup.key}"
+if [ ! -f "$BACKUP_KEY_FILE" ]; then
+  ( umask 077; openssl rand -hex 32 > "$BACKUP_KEY_FILE" )
+  ok "Ключ бэкапа создан: $BACKUP_KEY_FILE"
+fi
+echo "${Y}ВАЖНО:${N} скопируйте ключ бэкапа в надёжное место ВНЕ сервера. Без него бэкапы не расшифровать:"
+echo "  $(cat "$BACKUP_KEY_FILE")"
+if [ -d /etc/cron.d ] && [ "$(id -u)" = "0" ]; then
+  echo "17 3 * * * root cd $DEPLOY_DIR && ./backup.sh >> backups/backup.log 2>&1" > /etc/cron.d/claude-gateway-backup
+  chmod 644 /etc/cron.d/claude-gateway-backup
+  ok "cron: ежедневно в 03:17 (/etc/cron.d/claude-gateway-backup)"
+else
+  warn "cron не настроен автоматически — запускайте $DEPLOY_DIR/backup.sh вручную или добавьте в crontab."
+fi
+echo "Копия на другой сервер: добавьте BACKUP_REMOTE=user@host:/path в cron-строку (используется scp)."
+
+# ------------------------------------------- Шаг 7: проверка DNS -------------
+step 7 "Проверка DNS"
 PUB_IP=$(curl -s4 --max-time 8 https://api.ipify.org || curl -s4 --max-time 8 https://ifconfig.me || echo "")
 DNS_IP=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1 || true)
 echo "  Публичный IP сервера: ${PUB_IP:-не удалось определить}"
@@ -112,16 +162,16 @@ else
 fi
 confirm "Продолжить установку?" || die "Прервано. Настройте DNS и запустите install.sh снова."
 
-# ------------------------------------------- Шаг 7: запуск контейнеров -------
-step 7 "Запуск контейнеров"
+# ------------------------------------------- Шаг 8: запуск контейнеров -------
+step 8 "Запуск контейнеров"
 cd "$DEPLOY_DIR"
 docker compose pull 2>/dev/null || true
 docker compose up -d
 ok "Контейнеры запущены"
 docker compose ps
 
-# ------------------------------------------- Шаг 8: проверка -----------------
-step 8 "Проверка"
+# ------------------------------------------- Шаг 9: проверка -----------------
+step 9 "Проверка"
 sleep 4
 # без пароля ждём 401 (значит TLS + basic_auth на месте)
 CODE_NOAUTH=$(curl -s -o /dev/null -w "%{http_code}" --max-time 12 "https://$DOMAIN/__health" || echo 000)
@@ -147,12 +197,15 @@ ${B}Что дальше${N}
    по email (magic-link). Шлюз сам перехватит session-cookies в
    gateway/cookies/$ADMIN_USER.json
 
-3. ${B}Расширение для клиентов${N}: соберите под домен на своей машине —
-   ./configure.sh $DOMAIN   (или releases/configure-prebuilt.sh chrome $DOMAIN)
-   и раздайте extension/dist/chrome или dist/firefox + логин/пароль.
+3. ${B}Расширение для клиентов${N}: уже собрано под ваш домен и лежит на
+   https://$DOMAIN/__ext/   (за логином/паролем). Дайте клиенту эту ссылку,
+   его логин и пароль — больше ничего собирать не нужно.
 
-4. ${B}Добавить пользователя${N}:
-   cd $DEPLOY_DIR && ./add-user.sh <имя> <пароль>
+4. ${B}Пользователи${N} (cd $DEPLOY_DIR):
+   ./add-user.sh <имя>            — создать (пароль сгенерируется и покажется один раз)
+   ./add-user.sh <имя> <пароль>   — создать/сменить пароль
+   ./remove-user.sh <имя>         — удалить
+   Статус сессий (только для $ADMIN_USER): curl -u $ADMIN_USER https://$DOMAIN/__admin/status
 
 5. ${B}Логи${N}:  cd $DEPLOY_DIR && docker compose logs -f gateway
 

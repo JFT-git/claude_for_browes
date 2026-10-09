@@ -7,5 +7,5 @@
     "test:fingerprint": "sh tests/run-fingerprint-chrome.sh",
     "lint:firefox": "npx web-ext lint --source-dir extension/dist/firefox"
   },
-  "license": "UNLICENSED"
+  "license": "MIT"
 }
