@@ -1,5 +1,6 @@
 name: ci
 on: [push, pull_request]
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -8,11 +9,68 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: node --test tests/gateway.test.js
-      - name: build extension (both browsers)
-        run: ./configure.sh claude.example.com && ls extension/dist
-      - name: lint Firefox build
-        run: npx --yes web-ext lint --source-dir extension/dist/firefox
       - name: validate Caddyfile
         run: |
           sed -i 's/__BASIC_AUTH_USER__ __BASIC_AUTH_HASH__/u $2a$14$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234/' server/Caddyfile
           docker run --rm -v "$PWD/server/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile
+
+  build-addons:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build Chrome + Firefox add-ons
+        run: ./configure.sh claude.example.com
+      - name: Lint Firefox add-on
+        run: npx --yes web-ext lint --source-dir extension/dist/firefox
+      - name: Check no placeholders remain
+        run: |
+          ! grep -r "__GATEWAY" extension/dist/ || { echo "placeholders leaked into build"; exit 1; }
+      - name: Check fingerprint script is included
+        run: |
+          test -f extension/dist/chrome/fingerprint.js
+          test -f extension/dist/firefox/fingerprint.js
+      - name: Upload Chrome add-on
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-gateway-chrome
+          path: extension/dist/claude-gateway-chrome.zip
+          if-no-files-found: error
+      - name: Upload Firefox add-on
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-gateway-firefox
+          path: extension/dist/claude-gateway-firefox.zip
+          if-no-files-found: error
+
+  release:
+    needs: [test, build-addons]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build placeholder release zips
+        run: ./extension/release.sh
+      - name: Get version
+        id: ver
+        run: |
+          V=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' extension/manifest.chrome.json | head -1)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          TAG="v$V"
+          gh release create "$TAG" \
+            --title "Claude Gateway $V" \
+            --notes "Prebuilt extension packages (unconfigured — run releases/configure-prebuilt.sh <browser> <your-host>)." \
+            releases/claude-gateway-chrome-v$V.zip \
+            releases/claude-gateway-firefox-v$V.zip \
+            releases/SHA256SUMS \
+            --target main || true
