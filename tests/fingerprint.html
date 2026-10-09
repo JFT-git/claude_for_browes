@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><pre id="out">running</pre>
+<script>
+  if (location.search.includes("spoof")) document.write('<script src="../extension/fingerprint.js"><\/script>');
+</script>
+<script>
+  window.addEventListener("load", async () => { try {
+    const d = new Date(Date.UTC(2026, 9, 8, 12, 30, 0));
+    const r = {
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      numLocale: new Intl.NumberFormat().resolvedOptions().locale,
+      offset: d.getTimezoneOffset(),
+      hours: d.getHours(),
+      str: d.toString(),
+      localeStr: d.toLocaleString(),
+      localCtorHour: new Date(2026, 0, 1, 10).getUTCHours(),
+      isoLocal: new Date("2026-01-01T10:00:00").getUTCHours(),
+      lang: navigator.language,
+      langs: navigator.languages.join(","),
+      num: (1234567.89).toLocaleString(),
+      ctorOk: d.constructor === Date && d instanceof Date,
+      toStringNative: Function.prototype.toString.call(Date.prototype.getHours),
+      rtc: typeof RTCPeerConnection,
+      geo: await new Promise(res => (setTimeout(() => res("pending"), 500), navigator.geolocation.getCurrentPosition(() => res("allowed"), e => res("denied:" + e.code)))),
+      perm: await Promise.race([navigator.permissions.query({ name: "geolocation" }).then(p => p.state), new Promise(r => setTimeout(() => r("pending"), 500))]),
+    };
+    document.getElementById("out").textContent = JSON.stringify(r);
+    document.title = "done";
+  } catch (e) { document.getElementById("out").textContent = "ERROR " + e + e.stack; } });
+</script>

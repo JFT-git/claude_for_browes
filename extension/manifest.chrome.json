@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Gateway",
+  "version": "1.6.0",
+  "description": "Routes claude.ai through your gateway and presents a clean UTC / en-US browser fingerprint.",
+  "permissions": [
+    "declarativeNetRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://assets-proxy.anthropic.com/*",
+    "https://api.anthropic.com/*",
+    "https://__GATEWAY_HOST__/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Claude Gateway"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_redirect",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://__GATEWAY_HOST__/*"
+      ],
+      "js": [
+        "fingerprint.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    }
+  ]
+}

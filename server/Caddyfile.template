@@ -10,7 +10,10 @@ __DOMAIN__ {
     # Avoids 401 on dynamic import() where the browser does not send Authorization.
     @assets path /p/assets-proxy.anthropic.com/* /p/assets.claude.ai/*
     handle @assets {
-        reverse_proxy gateway:8088
+        reverse_proxy gateway:8088 {
+            # never let a client choose its identity
+            header_up -X-Remote-User
+        }
     }
 
     # Everything else requires basic_auth. The authenticated username is passed
@@ -27,9 +30,6 @@ __DOMAIN__ {
             # one line per user:  username  bcrypt-hash
             __BASIC_AUTH_USER__ __BASIC_AUTH_HASH__
         }
-        @desktop path /desktop /desktop/*
-        reverse_proxy @desktop browser:3000
-
         reverse_proxy gateway:8088 {
             header_up X-Remote-User {http.auth.user.id}
         }

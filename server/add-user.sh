@@ -41,7 +41,7 @@ fi
 
 # create the cookie slot dir entry (empty file the gateway will fill on first login)
 mkdir -p gateway/cookies
-touch "gateway/cookies/$USER.json"
+[ -f "gateway/cookies/$USER.json" ] || echo '{"cookies":[]}' > "gateway/cookies/$USER.json"
 chmod 600 "gateway/cookies/$USER.json" 2>/dev/null || true
 
 # reload caddy

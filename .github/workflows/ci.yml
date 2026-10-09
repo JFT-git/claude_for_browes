@@ -1,0 +1,18 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node --test tests/gateway.test.js
+      - name: build extension (both browsers)
+        run: ./configure.sh claude.example.com && ls extension/dist
+      - name: lint Firefox build
+        run: npx --yes web-ext lint --source-dir extension/dist/firefox
+      - name: validate Caddyfile
+        run: |
+          sed -i 's/__BASIC_AUTH_USER__ __BASIC_AUTH_HASH__/u $2a$14$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234/' server/Caddyfile
+          docker run --rm -v "$PWD/server/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile

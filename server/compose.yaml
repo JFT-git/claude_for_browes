@@ -1,57 +1,4 @@
 services:
-  browser:
-    image: lscr.io/linuxserver/chromium:latest
-    restart: unless-stopped
-    shm_size: 512m
-    mem_limit: 1500m
-    mem_reservation: 900m
-    oom_kill_disable: false
-    environment:
-      PUID: "1000"
-      PGID: "1000"
-      TZ: Etc/UTC
-      LC_ALL: en_US.UTF-8
-      # --- latency-optimized selkies ---
-      SELKIES_AUTO_GPU: "false"
-      SELKIES_GPU_ID: "-1"
-      SELKIES_ENCODER: jpeg
-      SELKIES_FRAMERATE: "18"
-      SELKIES_VIDEO_CRF: "28"
-      SELKIES_JPEG_QUALITY: "75"
-      SELKIES_RATE_CONTROL_MODE: crf
-      SELKIES_MANUAL_RESOLUTION: "true"
-      SELKIES_MANUAL_WIDTH: "1280"
-      SELKIES_MANUAL_HEIGHT: "720"
-      SELKIES_BACKPRESSURE_QUEUE_SIZE: "2"
-      SELKIES_KEYFRAME_INTERVAL: "0"
-      SELKIES_AUDIO_ENABLED: "false"
-      # --- clipboard / files ---
-      SELKIES_ENABLE_CLIPBOARD: "true"
-      SELKIES_ENABLE_BINARY_CLIPBOARD: "true"
-      SELKIES_CLIPBOARD_SEAMLESS: "true"
-      SELKIES_FILE_TRANSFERS: upload
-      SELKIES_FILE_MANAGER_PATH: /config/Desktop/Incoming
-      SELKIES_COMMAND_ENABLED: "false"
-      SELKIES_ENABLE_SHARING: "false"
-      SELKIES_UI_SIDEBAR_SHOW_CLIPBOARD: "true"
-      SELKIES_UI_SIDEBAR_SHOW_FILES: "true"
-      SELKIES_UI_SIDEBAR_SHOW_APPS: "false"
-      SELKIES_UI_SIDEBAR_SHOW_SHARING: "false"
-      SELKIES_UI_SIDEBAR_SHOW_VIDEO_SETTINGS: "false"
-      SELKIES_UI_SIDEBAR_SHOW_SCREEN_SETTINGS: "false"
-      SELKIES_UI_SIDEBAR_SHOW_STATS: "false"
-      SELKIES_UI_SIDEBAR_SHOW_GAMEPADS: "false"
-      SELKIES_PRINTING_ENABLED: "false"
-      # --- chromium: lean software rendering, keep en-US ---
-      CHROME_CLI: --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --remote-allow-origins=* --lang=en-US --disable-gpu --disable-gpu-rasterization --disable-smooth-scrolling --disable-features=CalculateNativeWinOcclusion,BackForwardCache,PaintHolding --renderer-process-limit=4 --num-raster-threads=1 https://claude.ai
-      DBUS_SESSION_BUS_ADDRESS: unix:path=/run/attachment-picker/session-bus
-      GTK_USE_PORTAL: "1"
-    volumes:
-    - browser-data:/config
-    - ./attachments/attachment-picker:/opt/attachment-picker:ro
-    - ./keyboard-fix:/opt/keyboard-fix:ro
-    - ./attachments/custom-cont-init.d:/custom-cont-init.d:ro
-    - ./attachments/custom-services.d:/custom-services.d:ro
   gateway:
     image: node:22-alpine
     restart: unless-stopped
@@ -65,24 +12,40 @@ services:
       # set your public gateway domain (configure.sh fills this)
       PUBLIC_HOST: ${PUBLIC_HOST:-claude.example.com}
     volumes:
-    - ./gateway/src:/app:ro
-    # writable: the gateway captures session cookies here on user login
-    - ./gateway/cookies:/cookies
+      - ./gateway/src:/app:ro
+      # writable: the gateway stores each user's session cookies here
+      - ./gateway/cookies:/cookies
+    # hardening: no extra privileges, read-only root fs, no published ports
+    # (reachable only from caddy over the internal docker network)
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     mem_limit: 256m
+    pids_limit: 128
+
   caddy:
     image: caddy:2
     restart: unless-stopped
     ports:
-    - 80:80
-    - 443:443
+      - 80:80
+      - 443:443
     volumes:
-    - ./Caddyfile:/etc/caddy/Caddyfile:ro
-    - caddy-data:/data
-    - caddy-config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
     depends_on:
-    - browser
-    - gateway
+      - gateway
+
 volumes:
-  browser-data: null
   caddy-data: null
   caddy-config: null

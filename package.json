@@ -1,0 +1,11 @@
+{
+  "name": "claude-for-browser",
+  "private": true,
+  "description": "Gateway + browser extension (Chrome/Firefox) for claude.ai",
+  "scripts": {
+    "test": "node --test tests/gateway.test.js",
+    "test:fingerprint": "sh tests/run-fingerprint-chrome.sh",
+    "lint:firefox": "npx web-ext lint --source-dir extension/dist/firefox"
+  },
+  "license": "UNLICENSED"
+}
