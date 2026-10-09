@@ -46,6 +46,16 @@ async function applyAuthRule() {
 async function healthCheck() {
   const cfg = await getConfig();
   if (!cfg.host || cfg.host.includes("__")) return { ok: false, reason: "not_configured" };
+  // The browser only lets the extension talk to hosts listed in its manifest. If the
+  // package was built for another domain (or is an unconfigured prebuilt zip),
+  // the request fails with a CORS error — detect that and say so.
+  const origin = "https://" + cfg.host + "/*";
+  let granted = true;
+  try { granted = await chrome.permissions.contains({ origins: [origin] }); } catch (e) { /* ignore */ }
+  if (!granted) {
+    const built = (chrome.runtime.getManifest().host_permissions || []).filter(h => !/claude\.ai|anthropic\.com/.test(h)).join(", ");
+    return { ok: false, reason: "wrong_build", built: built };
+  }
   const headers = {};
   if (cfg.user && cfg.pass) headers["Authorization"] = "Basic " + btoa(cfg.user + ":" + cfg.pass);
   try {

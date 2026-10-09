@@ -16,6 +16,7 @@ async function refresh() {
   chrome.runtime.sendMessage({ type: "health" }, (res) => {
     if (chrome.runtime.lastError || !res) { setState("bad", "Error"); return; }
     if (res.ok) setState("ok", "Connected" + (typeof res.users === "number" ? " · " + res.users + " user(s)" : ""));
+    else if (res.reason === "wrong_build") setState("bad", "Wrong build: extension is not configured for " + host + (res.built ? " (built for " + res.built + ")" : " (unconfigured package)") + ". Use configure-prebuilt.sh <browser> " + host);
     else if (res.reason === "auth_failed") setState("bad", "Auth failed — check credentials");
     else if (res.reason === "unreachable") setState("bad", "Gateway unreachable");
     else setState("bad", "Error " + (res.status || res.reason || ""));
