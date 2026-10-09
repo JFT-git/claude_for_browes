@@ -219,6 +219,14 @@ function rewriteBody(buf, ct) {
     if (h === "claude.ai") continue;
     s = s.replace(new RegExp("https?://" + h.replace(/\./g, "\\."), "g"), pub(h, ""));
   }
+  if (ct.includes("javascript")) {
+    // OAuth (Google/Apple) validates the JS origin. The page runs on the gateway
+    // host, so libraries that read location.origin would send the wrong origin.
+    // Make them see claude.ai instead. Requests to claude.ai are redirected back
+    // to the gateway by the extension, so this is safe.
+    s = s.replace(/(window|self|globalThis)\.location\.origin/g, '"https://claude.ai"');
+    s = s.replace(/([^.\w])location\.origin/g, '$1"https://claude.ai"');
+  }
   return Buffer.from(s, "utf8");
 }
 

@@ -65,6 +65,13 @@ test("logs never contain query strings", () => {
   assert.strictEqual(g.redactPath("/a#frag"), "/a");
 });
 
+test("js rewriting spoofs location.origin for OAuth", () => {
+  const js = 'var o=window.location.origin; var p=self.location.origin; var q=location.origin;';
+  const out = g.rewriteBody(Buffer.from(js), "application/javascript").toString();
+  assert.ok(!out.includes("location.origin"), "origin refs left: " + out);
+  assert.match(out, /"https:\/\/claude.ai"/);
+});
+
 test("csp and body rewriting", () => {
   assert.match(g.rewriteCsp("script-src https://assets-proxy.anthropic.com"), /gw\.example\.org/);
   const out = g.rewriteBody(Buffer.from('<script src="https://assets-proxy.anthropic.com/a.js">'), "text/html").toString();
