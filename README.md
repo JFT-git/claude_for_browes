@@ -199,6 +199,17 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 2. Назовите, например, «Claude»
 3. **Не** входите в Google-аккаунт в этом профиле
 
+### Готовые сборки (без компиляции)
+
+В папке [`releases/`](releases/) лежат готовые пакеты расширения для Chrome и Firefox (+ `SHA256SUMS`). Они **не привязаны к домену** — превратите их в рабочую папку под ваш шлюз одной командой:
+
+```sh
+./releases/configure-prebuilt.sh chrome  claude.example.com   # -> releases/claude-gateway-chrome/
+./releases/configure-prebuilt.sh firefox claude.example.com   # -> releases/claude-gateway-firefox/
+```
+
+Это то же самое, что собрать из исходников (`./configure.sh`), — содержимое можно сверить с `extension/` и контрольными суммами. Пересобрать релиз: `extension/release.sh` на чистой копии репозитория.
+
 ### Шаг 2. Установите расширение
 
 **Chrome / Edge:** `chrome://extensions` → **Режим разработчика** → **Загрузить распакованное** → папка `extension/dist/chrome`.
