@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Gateway",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Routes claude.ai through your gateway and presents a clean UTC / en-US browser fingerprint.",
   "permissions": [
     "declarativeNetRequest",

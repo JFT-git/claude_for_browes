@@ -50,5 +50,29 @@
       "resourceTypes": ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"],
       "excludedInitiatorDomains": ["__GATEWAY_DOMAIN__"]
     }
+  },
+  {
+    "id": 10,
+    "priority": 3,
+    "action": {
+      "type": "redirect",
+      "redirect": { "regexSubstitution": "https://accounts.google.com/\\1claude.ai\\2" }
+    },
+    "condition": {
+      "regexFilter": "^https://accounts\\.google\\.com/(.*)__GATEWAY_HOST__(.*)$",
+      "resourceTypes": ["main_frame", "sub_frame"]
+    }
+  },
+  {
+    "id": 11,
+    "priority": 3,
+    "action": {
+      "type": "redirect",
+      "redirect": { "regexSubstitution": "https://appleid.apple.com/\\1claude.ai\\2" }
+    },
+    "condition": {
+      "regexFilter": "^https://appleid\\.apple\\.com/(.*)__GATEWAY_HOST__(.*)$",
+      "resourceTypes": ["main_frame", "sub_frame"]
+    }
   }
 ]
