@@ -11,8 +11,8 @@ jobs:
       - run: node --test tests/gateway.test.js
       - name: validate Caddyfile
         run: |
-          sed -i 's/__BASIC_AUTH_USER__ __BASIC_AUTH_HASH__/u $2a$14$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234/' server/Caddyfile
-          docker run --rm -v "$PWD/server/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile
+          sed -i 's/__DOMAIN__/claude.example.com/; s/__BASIC_AUTH_USER__ __BASIC_AUTH_HASH__/u $2a$14$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234/' server/Caddyfile.template
+          docker run --rm -v "$PWD/server/Caddyfile.template:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile
 
   build-addons:
     runs-on: ubuntu-latest
