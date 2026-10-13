@@ -46,8 +46,8 @@ async function getConfig() {
 }
 
 async function clearAll() {
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,10,11,AUTH_RULE_ID] });
-  await chrome.scripting.unregisterContentScripts({ ids: ["fingerprint"] });
+  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,10,11,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
+  try { await chrome.scripting.unregisterContentScripts({ ids: ["fingerprint"] }); } catch (e) { /* no script yet */ }
 }
 
 async function applyRules() {
@@ -69,15 +69,20 @@ async function applyRules() {
     });
   }
 
-  await chrome.scripting.registerContentScripts([{
-    id: "fingerprint",
-    matches: ["https://" + cfg.host + "/*"],
-    js: ["fingerprint.js"],
-    runAt: "document_start",
-    allFrames: true,
-    matchAboutBlank: true,
-    world: "MAIN"
-  }]);
+  try {
+    await chrome.scripting.registerContentScripts([{
+      id: "fingerprint",
+      matches: ["https://" + cfg.host + "/*"],
+      js: ["fingerprint.js"],
+      runAt: "document_start",
+      allFrames: true,
+      matchAboutBlank: true,
+      world: "MAIN"
+    }]);
+  } catch (e) {
+    // DNR rules above must work even if the content script can't register yet
+    console.error("[gateway] content script registration failed:", e && e.message);
+  }
 
   return { ok: true };
 }
@@ -127,7 +132,12 @@ async function status() {
     const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: ["fingerprint"] });
     fpRegistered = scripts.length > 0;
   } catch (e) { /* ignore */ }
-  return { host: cfg.host, granted, fingerprint: fpRegistered, configured: !!(cfg.host && cfg.user && cfg.pass) };
+  let ruleCount = 0;
+  try {
+    const dr = await chrome.declarativeNetRequest.getDynamicRules();
+    ruleCount = dr.length;
+  } catch (e) { /* ignore */ }
+  return { host: cfg.host, granted, fingerprint: fpRegistered, rules: ruleCount, configured: !!(cfg.host && cfg.user && cfg.pass) };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

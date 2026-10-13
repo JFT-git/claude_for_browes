@@ -9,7 +9,7 @@ async function refresh() {
   chrome.runtime.sendMessage({ type: "status" }, (st) => {
     if (chrome.runtime.lastError || !st) { setState("bad", "Error"); return; }
     $host.textContent = st.host || "not configured";
-    $fp.textContent = st.fingerprint ? "UTC / en-US" : "off";
+    $fp.textContent = (st.fingerprint ? "UTC / en-US" : "off") + " · rules: " + (st.rules || 0);
     if (!st.host) { setState("warn", "Not configured — open Settings"); return; }
     if (!st.granted) { setState("warn", "Access not granted — open Settings"); return; }
     setState("unknown", "Checking…");
