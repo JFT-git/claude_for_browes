@@ -159,6 +159,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
 });
 chrome.runtime.onStartup.addListener(applyRules);
+chrome.permissions.onAdded.addListener((p) => {
+  // user just granted access to the gateway host — (re)register everything
+  if (p && p.origins && p.origins.length) applyRules();
+});
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && (changes.gatewayHost || changes.authUser || changes.authPass)) {
     clearAll().then(applyRules);
