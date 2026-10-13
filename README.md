@@ -218,6 +218,7 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 ### Что выдать клиенту
 
 - Папку `extension/dist/chrome` (Chrome/Edge) или `extension/dist/firefox` (Firefox) — собирается командой `./configure.sh <домен>` (уже настроено под ваш домен)
+- Или скачайте готовое расширение с `https://<домен>/__ext/` (за логином/паролем) — одна сборка на все домены
 - Gateway host (например `claude.example.com`)
 - Его basic_auth **user** и **password**
 
@@ -241,8 +242,10 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 ### Шаг 2. Установите расширение
 
 **Chrome / Edge:** `chrome://extensions` → **Режим разработчика** → **Загрузить распакованное** → папка `extension/dist/chrome`.
+После загрузки откройте **Настройки** расширения, введите домен шлюза и нажмите «Сохранить и разрешить». Браузер запросит доступ к домену — подтвердите.
 
 **Firefox (≥ 128):** `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → `extension/dist/firefox/manifest.json`. Временное дополнение снимается при перезапуске Firefox; для постоянной установки подпишите пакет `extension/dist/claude-gateway-firefox.zip` на [addons.mozilla.org](https://addons.mozilla.org/developers/) (unlisted) — или используйте Firefox Developer/Nightly с `xpinstall.signatures.required=false`.
+После загрузки откройте **Настройки** расширения, введите домен шлюза и нажмите «Сохранить и разрешить».
 
 Откройте **Settings** расширения и введите:
 - **Gateway host:** например `claude.example.com`

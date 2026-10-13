@@ -5,7 +5,7 @@
 - **Chrome/Edge**: ставится в один клик из Chrome Web Store, без режима разработчика.
 - **Firefox ≥ 128**: ставится из AMO, без `about:debugging` и перезагрузки.
 
-Публикация требует аккаунтов разработчика, которые **вы** создаёте сами. Я не могу зарегистрировать их за вас. Но всё остальное — подготовка пакетов, скрипты и инструкции — готово.
+Публикация требует аккаунтов разработчика, которые **вы** создаёте сами. Я не могу зарегистрировать их за вас. Но всё остальное — подготовка пакетов, графика и готовый текст для всех полей — готово.
 
 ---
 
@@ -15,18 +15,17 @@
 
 1. Откройте https://chrome.google.com/webstore/devconsole/ (войдите в Google-аккаунт).
 2. Заплатите $5 единоразово (Google Wallet).
-3. **Account → Developer → Add new item → Extension**, заполните:
-   - **Name**: `Claude Gateway`
-   - **Upload a zip**: соберите `releases/claude-gateway-chrome-v1.7.0.zip` (см. ниже, как собрать)
-   - **Visibility**: Unlisted (только по прямой ссылке)
-4. Сохраните **Item ID** (начинается с `chrome-extension://...`).
+3. **Account → Developer → Add new item → Extension**, заполните поля (текст ниже).
+4. **Upload a zip**: `releases/claude-gateway-chrome-v1.7.0.zip` (см. Шаг 2 — как собрать).
+5. **Visibility**: Unlisted (только по прямой ссылке).
+6. Сохраните **Item ID** (начинается с `chrome-extension://...`).
 
 ### Firefox AMO
 
 1. Откройте https://addons.mozilla.org/developers/ (войдите в Firefox-аккаунт).
 2. **Submit a New Add-on → Continue**.
-3. Заполните метаданные (имя, описание, категория Tools).
-4. **Upload a package**: соберите `releases/claude-gateway-firefox-v1.7.0.zip`.
+3. Заполните поля (текст ниже).
+4. **Upload a package**: `releases/claude-gateway-firefox-v1.7.0.zip`.
 5. **Visibility**: Unlisted (только по прямой ссылке).
 6. Сохраните **Add-on ID** и **UUID**.
 
@@ -34,7 +33,7 @@
 
 ## Шаг 2. Сборка пакетов для публикации
 
-Пакеты в `releases/` — с плейсхолдером `__GATEWAY_HOST__`, их нельзя публиковать как есть. Нужно собрать под ваш домен **до** публикации:
+Пакеты в `releases/` — универсальные, одна сборка на все домены. Пользователь вводит свой домен шлюза в настройках расширения, и расширение само запрашивает доступ и регистрирует правила. Собирайте под ваш домен **до** публикации:
 
 ```sh
 git clone <этот-репозиторий> && cd claude_for_browes
@@ -42,22 +41,73 @@ git clone <этот-репозиторий> && cd claude_for_browes
 ```
 
 Если вы уже запускали `configure.sh`, плейсхолдеры заменены. Чтобы пересобрать пакеты с плейсхолдерами, сбросьте изменения:
+
 ```sh
 git checkout -- extension/manifest.chrome.json extension/manifest.firefox.json \
               extension/rules.json extension/background.js
 ./extension/release.sh
 ```
 
-Проверка: в `releases/*.zip` не должно остаться `__GATEWAY_HOST__`:
+Проверка: в `releases/*.zip` не должно остаться `__GATEWAY_HOST__` (плейсхолдер заменяется на домен):
+
 ```sh
 grep -l "__GATEWAY" releases/*.zip && echo "FAIL: плейсхолдер в пакете" || echo "OK: пакет готов к публикации"
 ```
 
 ---
 
-## Шаг 3. Подпись Firefox (без AMO-кредов — не получится)
+## Шаг 3. Текст для полей Chrome Web Store
+
+### Сведения о продукте
+
+| Поле | Значение |
+|---|---|
+| **Название** (все языки) | `Claude Gateway` |
+| **Краткое описание** (≤132 симв.) | `Routes claude.ai through your gateway with a clean UTC / en-US fingerprint.` |
+| **Описание** (≤16 000 симв.) | Access Claude.ai through your own gateway — no VPN, no lag. The gateway stores Claude session cookies on the server and injects them into proxied requests, so the client browser renders Claude natively: full Russian input, clipboard, drag-and-drop files. Claude sees the server IP (Amsterdam), not yours. The browser extension redirects claude.ai and its asset domains to the gateway and adds basic_auth. A fingerprint script normalises the page to UTC / en-US, geolocation denied, WebRTC disabled — for a clean browser profile. Open source: gateway, extension, server config, tests — all on GitHub. Multi-user: each user gets their own Claude account and cookie file. |
+| **Категория** | Productivity |
+| **Язык** | English (United States) |
+| **URL главной страницы** | `https://github.com/JFT-git/claude_for_browes` |
+| **URL службы поддержки** | `https://github.com/JFT-git/claude_for_browes/issues` |
+
+### Графика
+
+| Поле | Файл |
+|---|---|
+| **Значок** (128×128) | `extension/icon128.png` |
+| **Скриншот** (1280×800 или 640×400) | `extension/store-assets/screenshot-1.png` |
+| **Мал. промо** (440×280) | `extension/store-assets/promo-440x280.png` |
+| **Больш. промо** (1400×560) | `extension/store-assets/promo-1400x560.png` |
+
+### Дополнительные поля
+
+| Поле | Значение |
+|---|---|
+| Официальный URL | — |
+| URL главной страницы | `https://github.com/JFT-git/claude_for_browes` |
+| URL службы поддержки | `https://github.com/JFT-git/claude_for_browes/issues` |
+| Только для взрослых | Нет |
+
+---
+
+## Шаг 4. Текст для полей Firefox AMO
+
+| Поле | Значение |
+|---|---|
+| **Name** | `Claude Gateway` |
+| **Summary** (≤250 симв.) | `Routes claude.ai through your gateway with a clean UTC / en-US browser fingerprint.` |
+| **Description** | Access Claude.ai through your own gateway — no VPN, no lag. The gateway stores Claude session cookies on the server and injects them into proxied requests, so the client browser renders Claude natively: full Russian input, clipboard, drag-and-drop files. Claude sees the server IP (Amsterdam), not yours. The browser extension redirects claude.ai and its asset domains to the gateway and adds basic_auth. A fingerprint script normalises the page to UTC / en-US, geolocation denied, WebRTC disabled — for a clean browser profile. Open source: gateway, extension, server config, tests — all on GitHub. Multi-user: each user gets their own Claude account and cookie file. |
+| **Categories** | Privacy & Security, Productivity |
+| **Язык** | English (United States) |
+| **Homepage URL** | `https://github.com/JFT-git/claude_for_browes` |
+| **Support URL** | `https://github.com/JFT-git/claude_for_browes/issues` |
+
+---
+
+## Шаг 5. Подпись Firefox
 
 `web-ext sign` требует `--api-key` и `--api-secret` от AMO. Без них:
+
 ```sh
 npx web-ext sign --source-dir extension/dist/firefox \
   --api-key <ВАШ_API_KEY> --api-secret <ВАШ_API_SECRET> --channel unlisted
@@ -67,13 +117,13 @@ npx web-ext sign --source-dir extension/dist/firefox \
 - Скачается подписаный `.xpi`.
 - Пользователи ставят его по прямой ссылке (unlisted), без `about:debugging`.
 
-**Если не хотите создавать аккаунт AMO**, есть обходной путь:
+**Если не хотите создавать аккаунт AMO**, есть обходной путь:**
 - Firefox Developer/Nightly: `about:config` → `xpinstall.signatures.required = false`, ставьте `.xpi` напрямую.
 - Это работает только на Developer/Nightly, не на обычном Firefox.
 
 ---
 
-## Шаг 4. Подпись Chrome (без аккаунта Google — не получится)
+## Шаг 6. Подпись Chrome
 
 Chrome Web Store требует аккаунт Google-разработчика ($5). Без него:
 - Загрузите `releases/claude-gateway-chrome-v1.7.0.zip` в DevConsole (Шаг 1).
@@ -86,7 +136,7 @@ Chrome Web Store требует аккаунт Google-разработчика (
 
 ---
 
-## Шаг 5. Обновление версий
+## Шаг 7. Обновление версий
 
 Когда меняете расширение, поднимите версию в `manifest.chrome.json` и `manifest.firefox.json`, пересоберите пакеты (`./extension/release.sh`), загрузите новые версии в Web Store и AMO. Пользователи получат обновление автоматически.
 
@@ -98,8 +148,9 @@ Chrome Web Store требует аккаунт Google-разработчика (
 - [ ] Аккаунт AMO
 - [ ] `./configure.sh <домен>` — пакеты собраны
 - [ ] `grep "__GATEWAY" releases/*.zip` — плейсхолдеров нет
-- [ ] Chrome: загружен в Web Store (unlisted)
-- [ ] Firefox: загружен в AMO (unlisted)
+- [ ] Chrome: поля заполнены, zip загружен в Web Store (unlisted)
+- [ ] Firefox: поля заполнены, zip загружен в AMO (unlisted)
+- [ ] Firefox: `npx web-ext sign` — подписаный `.xpi` получен
 - [ ] Ссылки установки добавлены в README
 
 ## Безопасность

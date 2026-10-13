@@ -1,18 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Claude Gateway",
-  "version": "1.7.0",
-  "description": "Routes claude.ai through your gateway and presents a clean UTC / en-US browser fingerprint.",
+  "version": "1.8.0",
+  "description": "Routes claude.ai through your gateway. Enter your gateway host once \u2014 one build for all domains.",
   "permissions": [
     "declarativeNetRequest",
-    "storage"
-  ],
-  "host_permissions": [
-    "https://claude.ai/*",
-    "https://*.claude.ai/*",
-    "https://assets-proxy.anthropic.com/*",
-    "https://api.anthropic.com/*",
-    "https://__GATEWAY_HOST__/*"
+    "storage",
+    "scripting"
   ],
   "background": {
     "service_worker": "background.js"
@@ -29,15 +23,6 @@
     "48": "icon48.png",
     "128": "icon128.png"
   },
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "ruleset_redirect",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
   "content_scripts": [
     {
       "matches": [
@@ -51,5 +36,8 @@
       "match_about_blank": true,
       "world": "MAIN"
     }
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ]
 }

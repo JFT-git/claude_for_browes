@@ -2,30 +2,32 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Claude Gateway — Settings</title>
 <style>
-  body { font-family: -apple-system, sans-serif; max-width: 520px; margin: 40px auto; padding: 0 20px; }
-  label { display: block; margin: 14px 0 4px; font-weight: 600; }
-  input { width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box; }
-  button { margin-top: 22px; padding: 10px 20px; font-size: 14px; cursor: pointer; }
-  .note { margin-top: 24px; padding: 12px; background: #f0f4ff; border-radius: 6px; font-size: 13px; line-height: 1.5; }
-  .ok { color: #0a0; font-weight: 700; margin-left: 10px; }
-  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  h2 { margin-bottom: 8px; }
+  .hint { color: #6b7280; font-size: 13px; margin-bottom: 24px; }
+  label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 500; }
+  input { width: 100%; padding: 8px; font-size: 13px; border: 1px solid #d1d5db; border-radius: 6px; box-sizing: border-box; }
+  button { margin-top: 16px; padding: 10px 20px; font-size: 13px; cursor: pointer; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }
+  button.primary { background: #4f46e5; color: #fff; border: none; }
+  #status { margin-left: 12px; font-size: 13px; }
+  .warn { color: #f59e0b; } .err { color: #ef4444; }
+  #perm-status { margin-top: 20px; padding: 12px; background: #f3f4f6; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
 <body>
-  <h2>Claude Gateway</h2>
-  <p style="color:#555">Enter the credentials your administrator gave you.</p>
-  <label>Gateway host <input id="host" placeholder="claude.example.com"></label>
-  <label>User <input id="user" placeholder="username"></label>
-  <label>Password <input id="pass" type="password"></label>
-  <button id="save">Save</button>
-  <span id="status" class="ok" style="display:none">Saved</span>
-  <div class="note">
-    After saving, open <code>https://claude.ai</code> in this profile.
-    Traffic is routed through the gateway with your Claude session cookies injected server-side.
-    Keep this profile in English (US) and UTC timezone for a clean fingerprint.
-  </div>
-<script src="options.js"></script>
+  <h2>Claude Gateway — Настройки</h2>
+  <p class="hint">Одна сборка для всех доменов. Введите домен вашего шлюза и нажмите «Сохранить и разрешить».</p>
+  <label>Домен шлюза</label>
+  <input id="host" placeholder="claude.example.com">
+  <label>Пользователь</label>
+  <input id="user" placeholder="owner">
+  <label>Пароль</label>
+  <input id="pass" type="password">
+  <button id="save" class="primary">Сохранить и разрешить</button>
+  <button id="grant">Только разрешить доступ</button>
+  <span id="status" style="display:none"></span>
+  <div id="perm-status">…</div>
+  <script src="options.js"></script>
 </body>
 </html>

@@ -1,61 +1,104 @@
-// Claude Gateway — background worker.
-// - Static redirect rules (rules.json) route claude.ai + asset hosts to the gateway.
-// - The basic_auth Authorization header is applied dynamically from credentials
-//   entered on the Options page (no file editing per client).
-// - Onboarding: opens Options on first install if not configured.
-// - Health: answers "ping" from the popup with gateway reachability + auth status.
+// Claude Gateway — background worker (dynamic, one build for all domains).
+// The user enters their gateway host in Options. The extension then:
+//   1. Requests host permission for https://<host>/*
+//   2. Registers dynamic DNR rules (claude.ai + asset hosts -> <host>)
+//   3. Registers the fingerprint content-script for <host>
+//   4. Adds the basic_auth Authorization header for <host>
+// Everything persists across browser restarts.
 
-const HOST_PLACEHOLDER = "__GATEWAY_HOST__";
 const AUTH_RULE_ID = 1000;
 const RESOURCE_TYPES = ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"];
 
+function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function domainOf(host) {
+  const parts = host.split(".");
+  return parts.length > 2 ? parts.slice(-2).join(".") : host;
+}
+
+function buildRules(host) {
+  const d = domainOf(host);
+  const esc = escapeRegex(host);
+  return [
+    { id: 1, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "\\1" } },
+      condition: { regexFilter: "^https://(?:www\\.)?claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+    { id: 2, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/assets.claude.ai\\1" } },
+      condition: { regexFilter: "^https://assets\\.claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+    { id: 3, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/assets-proxy.anthropic.com\\1" } },
+      condition: { regexFilter: "^https://assets-proxy\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+    { id: 4, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/api.anthropic.com\\1" } },
+      condition: { regexFilter: "^https://api\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+    { id: 10, priority: 3,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://accounts.google.com/\\1claude.ai\\2" } },
+      condition: { regexFilter: "^https://accounts\\.google\\.com/(.*)" + esc + "(.*)$", resourceTypes: ["main_frame", "sub_frame"] } },
+    { id: 11, priority: 3,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://appleid.apple.com/\\1claude.ai\\2" } },
+      condition: { regexFilter: "^https://appleid\\.apple\\.com/(.*)" + esc + "(.*)$", resourceTypes: ["main_frame", "sub_frame"] } },
+  ];
+}
+
 async function getConfig() {
   const c = await chrome.storage.local.get(["gatewayHost", "authUser", "authPass"]);
-  return {
-    host: (c.gatewayHost || "").trim(),
-    user: (c.authUser || "").trim(),
-    pass: c.authPass || ""
-  };
+  return { host: (c.gatewayHost || "").trim(), user: (c.authUser || "").trim(), pass: c.authPass || "" };
 }
 
-function configured(cfg) {
-  return cfg.host && !cfg.host.includes("__") && cfg.user && cfg.pass;
+async function clearAll() {
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,10,11,AUTH_RULE_ID] });
+  await chrome.scripting.unregisterContentScripts({ ids: ["fingerprint"] });
 }
 
-async function applyAuthRule() {
+async function applyRules() {
   const cfg = await getConfig();
-  if (!configured(cfg)) return false;
-  const b64 = btoa(cfg.user + ":" + cfg.pass);
-  const rule = {
-    id: AUTH_RULE_ID,
-    priority: 2,
-    action: { type: "modifyHeaders", requestHeaders: [{ header: "authorization", operation: "set", value: "Basic " + b64 }] },
-    condition: { urlFilter: "||" + cfg.host, resourceTypes: RESOURCE_TYPES }
-  };
+  if (!cfg.host || cfg.host.includes("__")) {
+    await clearAll();
+    return { ok: false, reason: "not_configured" };
+  }
+  const rules = buildRules(cfg.host);
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: rules.map(r => r.id), addRules: rules });
+
+  if (cfg.user && cfg.pass) {
+    const b64 = btoa(cfg.user + ":" + cfg.pass);
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [AUTH_RULE_ID],
+      addRules: [{ id: AUTH_RULE_ID, priority: 2,
+        action: { type: "modifyHeaders", requestHeaders: [{ header: "authorization", operation: "set", value: "Basic " + b64 }] },
+        condition: { urlFilter: "||" + cfg.host, resourceTypes: RESOURCE_TYPES } }]
+    });
+  }
+
+  await chrome.scripting.registerContentScripts([{
+    id: "fingerprint",
+    matches: ["https://" + cfg.host + "/*"],
+    js: ["fingerprint.js"],
+    runAt: "document_start",
+    allFrames: true,
+    matchAboutBlank: true,
+    world: "MAIN"
+  }]);
+
+  return { ok: true };
+}
+
+async function requestHostPermission() {
+  const cfg = await getConfig();
+  if (!cfg.host || cfg.host.includes("__")) return { granted: false, reason: "not_configured" };
   try {
-    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [AUTH_RULE_ID], addRules: [rule] });
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [AUTH_RULE_ID], addRules: [rule] });
-    return true;
+    const granted = await chrome.permissions.request({ origins: ["https://" + cfg.host + "/*"] });
+    if (granted) await applyRules();
+    return { granted };
   } catch (e) {
-    console.error("[claude-gateway] auth rule failed", e);
-    return false;
+    return { granted: false, error: e.message };
   }
 }
 
-// Health check used by the popup: reach the gateway /__health with basic_auth.
 async function healthCheck() {
   const cfg = await getConfig();
   if (!cfg.host || cfg.host.includes("__")) return { ok: false, reason: "not_configured" };
-  // The browser only lets the extension talk to hosts listed in its manifest. If the
-  // package was built for another domain (or is an unconfigured prebuilt zip),
-  // the request fails with a CORS error — detect that and say so.
-  const origin = "https://" + cfg.host + "/*";
-  let granted = true;
-  try { granted = await chrome.permissions.contains({ origins: [origin] }); } catch (e) { /* ignore */ }
-  if (!granted) {
-    const built = (chrome.runtime.getManifest().host_permissions || []).filter(h => !/claude\.ai|anthropic\.com/.test(h)).join(", ");
-    return { ok: false, reason: "wrong_build", built: built };
-  }
+  const granted = await chrome.permissions.contains({ origins: ["https://" + cfg.host + "/*"] });
+  if (!granted) return { ok: false, reason: "no_permission" };
   const headers = {};
   if (cfg.user && cfg.pass) headers["Authorization"] = "Basic " + btoa(cfg.user + ":" + cfg.pass);
   try {
@@ -74,22 +117,42 @@ async function healthCheck() {
   }
 }
 
+async function status() {
+  const cfg = await getConfig();
+  const granted = cfg.host && !cfg.host.includes("__")
+    ? await chrome.permissions.contains({ origins: ["https://" + cfg.host + "/*"] })
+    : false;
+  let fpRegistered = false;
+  try {
+    const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: ["fingerprint"] });
+    fpRegistered = scripts.length > 0;
+  } catch (e) { /* ignore */ }
+  return { host: cfg.host, granted, fingerprint: fpRegistered, configured: !!(cfg.host && cfg.user && cfg.pass) };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg && msg.type === "health") {
-    healthCheck().then(sendResponse);
-    return true; // async
-  }
+  if (!msg) return;
+  const handlers = {
+    health: healthCheck,
+    status: status,
+    requestPermission: requestHostPermission,
+    apply: applyRules,
+  };
+  const h = handlers[msg.type];
+  if (h) { h().then(sendResponse); return true; }
 });
 
 chrome.runtime.onInstalled.addListener(async (details) => {
-  await applyAuthRule();
+  await applyRules();
   if (details.reason === "install") {
     const cfg = await getConfig();
-    if (!configured(cfg)) chrome.runtime.openOptionsPage();
+    if (!cfg.host) chrome.runtime.openOptionsPage();
   }
 });
-chrome.runtime.onStartup.addListener(applyAuthRule);
+chrome.runtime.onStartup.addListener(applyRules);
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && (changes.authUser || changes.authPass || changes.gatewayHost)) applyAuthRule();
+  if (area === "local" && (changes.gatewayHost || changes.authUser || changes.authPass)) {
+    clearAll().then(applyRules);
+  }
 });
-applyAuthRule();
+applyRules();

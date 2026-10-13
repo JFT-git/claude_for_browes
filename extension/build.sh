@@ -1,10 +1,9 @@
 #!/bin/sh
 # Build per-browser extension folders + zips from the shared sources.
-#   ./build.sh            -> dist/chrome, dist/firefox (+ .zip)
-# Run ../configure.sh <gateway-host> FIRST so the placeholders are filled in.
+# One build for all domains — the user enters their gateway host in Options.
 set -e
 cd "$(dirname "$0")"
-SHARED="background.js popup.html popup.js options.html options.js rules.json fingerprint.js icon48.png icon128.png"
+SHARED="background.js popup.html popup.js options.html options.js fingerprint.js icon48.png icon128.png"
 rm -rf dist && mkdir -p dist
 for b in chrome firefox; do
   mkdir -p "dist/$b"

@@ -3,7 +3,6 @@
 # Run on a clean checkout (before ./configure.sh), otherwise placeholders are already replaced.
 set -e
 cd "$(dirname "$0")"
-if ! grep -q "__GATEWAY_HOST__" manifest.chrome.json; then echo "Sources already configured — use a clean checkout"; exit 1; fi
 V=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' manifest.chrome.json | head -1)
 ./build.sh >/dev/null
 mkdir -p ../releases

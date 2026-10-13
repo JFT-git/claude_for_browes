@@ -15,10 +15,9 @@ DOMAIN=$(echo "$HOST" | awk -F. '{if (NF>2) print $(NF-1)"."$NF; else print $0}'
 echo "Configuring for gateway host: $HOST (domain: $DOMAIN)"
 
 # Extension files
-for f in extension/manifest.chrome.json extension/manifest.firefox.json extension/rules.json extension/background.js; do
   if [ -f "$f" ]; then
     sed -i.bak "s/__GATEWAY_HOST__/$HOST/g; s/__GATEWAY_DOMAIN__/$DOMAIN/g" "$f" && rm "$f.bak"
-    echo "  configured $f"
+    
   fi
 done
 
