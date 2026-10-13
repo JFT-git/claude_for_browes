@@ -10,27 +10,21 @@ const AUTH_RULE_ID = 1000;
 const RESOURCE_TYPES = ["main_frame","sub_frame","xmlhttprequest","script","stylesheet","image","font","media","websocket","other","csp_report","ping"];
 
 function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-function domainOf(host) {
-  const parts = host.split(".");
-  return parts.length > 2 ? parts.slice(-2).join(".") : host;
-}
-
 function buildRules(host) {
-  const d = domainOf(host);
   const esc = escapeRegex(host);
   return [
     { id: 1, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "\\1" } },
-      condition: { regexFilter: "^https://(?:www\\.)?claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+      condition: { regexFilter: "^https://(?:www\\.)?claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES } },
     { id: 2, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/assets.claude.ai\\1" } },
-      condition: { regexFilter: "^https://assets\\.claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+      condition: { regexFilter: "^https://assets\\.claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES } },
     { id: 3, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/assets-proxy.anthropic.com\\1" } },
-      condition: { regexFilter: "^https://assets-proxy\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+      condition: { regexFilter: "^https://assets-proxy\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
     { id: 4, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/api.anthropic.com\\1" } },
-      condition: { regexFilter: "^https://api\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES, excludedInitiatorDomains: [d] } },
+      condition: { regexFilter: "^https://api\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
     { id: 10, priority: 3,
       action: { type: "redirect", redirect: { regexSubstitution: "https://accounts.google.com/\\1claude.ai\\2" } },
       condition: { regexFilter: "^https://accounts\\.google\\.com/(.*)" + esc + "(.*)$", resourceTypes: ["main_frame", "sub_frame"] } },
