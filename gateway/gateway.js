@@ -427,7 +427,7 @@ function cachePut(k, e) {
 
 // ------------------------------------------------ extension download page ----
 
-const EXT_FILES = { "claude-gateway-chrome.zip": "application/zip", "claude-gateway-firefox.zip": "application/zip" };
+const EXT_FILES = { "claude-gateway-chrome.zip": "application/zip", "claude-gateway-firefox.zip": "application/zip", "gateway-connector-firefox.xpi": "application/x-xpinstall" };
 
 function extIndexHtml() {
   const h = cfg.publicHost;
@@ -436,7 +436,8 @@ function extIndexHtml() {
     '<h2>Claude Gateway — расширение</h2>' +
     '<p>Сборка уже настроена на <b>' + h + '</b>.</p><ul>' +
     '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge (zip)</a> — распакуйте, <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное»</li>' +
-    '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox ≥ 128 (zip)</a> — распакуйте, <code>about:debugging</code> → «Load Temporary Add-on» → manifest.json</li></ul>' +
+    '<li><a href="/__ext/gateway-connector-firefox.xpi"><b>Firefox ≥ 128 (подписанный .xpi)</b></a> — просто откройте файл, установка в один клик</li>' +
+    '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox (zip, без подписи)</a> — <code>about:debugging</code> → «Load Temporary Add-on» (снимается после перезапуска)</li></ul>' +
     '<p>В настройках расширения введите хост <code>' + h + '</code>, ваш логин и пароль.</p></body>';
 }
 
