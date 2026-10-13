@@ -15,6 +15,22 @@ async function refreshPerm() {
   });
 }
 
+// permissions.request() MUST be called directly from this click handler
+// (Chrome only allows it with a live user gesture — not via background messages).
+async function requestAccess() {
+  const host = $h.value.trim();
+  if (!host) { show("Введите домен шлюза", "err"); return false; }
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ origins: ["https://" + host + "/*"] });
+  } catch (e) {
+    show("Ошибка: " + e.message, "err");
+    return false;
+  }
+  if (granted) await chrome.runtime.sendMessage({ type: "apply" });
+  return granted;
+}
+
 chrome.storage.local.get(["gatewayHost", "authUser", "authPass"], (r) => {
   $h.value = r.gatewayHost || "";
   $u.value = r.authUser || "";
@@ -27,17 +43,15 @@ document.getElementById("save").addEventListener("click", async () => {
     authUser: $u.value.trim(),
     authPass: $p.value
   });
-  const res = await chrome.runtime.sendMessage({ type: "requestPermission" });
-  if (res && res.granted) { show("Сохранено и доступ разрешён ✔"); }
-  else if (res && res.error) { show("Ошибка: " + res.error, "err"); }
-  else { show("Сохранено. Разрешите доступ к домену, когда браузер спросит.", "warn"); }
+  const granted = await requestAccess();
+  if (granted) show("Сохранено и доступ разрешён ✔");
+  else show("Сохранено. Разрешите доступ к домену, когда браузер спросит.", "warn");
   refreshPerm();
 });
 
 document.getElementById("grant").addEventListener("click", async () => {
-  const res = await chrome.runtime.sendMessage({ type: "requestPermission" });
-  if (res && res.granted) { show("Доступ разрешён ✔"); }
-  else { show("Доступ не разрешён", "err"); }
+  const granted = await requestAccess();
+  if (granted) show("Доступ разрешён ✔");
   refreshPerm();
 });
 

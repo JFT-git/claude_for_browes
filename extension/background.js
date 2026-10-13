@@ -135,7 +135,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handlers = {
     health: healthCheck,
     status: status,
-    requestPermission: requestHostPermission,
     apply: applyRules,
   };
   const h = handlers[msg.type];
