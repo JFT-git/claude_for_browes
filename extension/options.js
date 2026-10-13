@@ -20,9 +20,12 @@ async function refreshPerm() {
 async function requestAccess() {
   const host = $h.value.trim();
   if (!host) { show("Введите домен шлюза", "err"); return false; }
+  // Request broad access: the redirect rules cover claude.ai + asset hosts, and Chrome
+  // applies DNR redirects reliably only when the extension has wide host access.
+  // The prompt will read "Доступ к вашим данным для всех веб-сайтов".
   let granted = false;
   try {
-    granted = await chrome.permissions.request({ origins: ["https://" + host + "/*"] });
+    granted = await chrome.permissions.request({ origins: ["https://*/*"] });
   } catch (e) {
     show("Ошибка: " + e.message, "err");
     return false;
