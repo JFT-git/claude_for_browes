@@ -1,5 +1,10 @@
 #!/bin/sh
-# Configure the extension + server templates for a given gateway domain.
+# Configure the SERVER for a given gateway domain.
+# The browser extension no longer needs a domain — the user enters it in Options
+# (one build for all domains). This script only:
+#   * generates server/Caddyfile from the template
+#   * sets PUBLIC_HOST in server/compose.yaml
+#   * builds the (domain-independent) extension packages
 # Usage: ./configure.sh claude.example.com
 set -e
 
@@ -9,19 +14,9 @@ if [ -z "$HOST" ]; then
   exit 1
 fi
 
-# Domain part for excludedInitiatorDomains (e.g. example.com from claude.example.com)
-DOMAIN=$(echo "$HOST" | awk -F. '{if (NF>2) print $(NF-1)"."$NF; else print $0}')
+echo "Configuring server for gateway host: $HOST"
 
-echo "Configuring for gateway host: $HOST (domain: $DOMAIN)"
-
-# Extension files
-  if [ -f "$f" ]; then
-    sed -i.bak "s/__GATEWAY_HOST__/$HOST/g; s/__GATEWAY_DOMAIN__/$DOMAIN/g" "$f" && rm "$f.bak"
-    
-  fi
-done
-
-# Build per-browser packages (extension/dist/chrome, extension/dist/firefox)
+# Build the extension (domain-independent: host is entered by the user in Options)
 if command -v zip >/dev/null 2>&1; then
   ./extension/build.sh
 else
@@ -31,7 +26,7 @@ fi
 # Server Caddyfile
 if [ -f server/Caddyfile.template ]; then
   sed "s/__DOMAIN__/$HOST/g" server/Caddyfile.template > server/Caddyfile
-  echo "  generated server/Caddyfile (remember to set __BASIC_AUTH_USER__ and __BASIC_AUTH_HASH__)"
+  echo "  generated server/Caddyfile (install.sh will set the basic_auth user + hash)"
 fi
 
 # Server compose: set PUBLIC_HOST so the gateway rewrites URLs to your domain
@@ -42,7 +37,6 @@ fi
 
 echo ""
 echo "Done. Next steps:"
-echo "  1. Server: edit server/Caddyfile — set basic_auth user + hash (caddy hash-password)"
-echo "  2. Server: see docs/DEPLOY-SERVER.md"
-echo "  3. Client: load extension/dist/chrome (Chrome) or extension/dist/firefox (Firefox), set credentials in Options"
-echo "     see docs/SETUP-CLIENT.md"
+echo "  1. Server: run ./install.sh (interactive) or docs/DEPLOY-SERVER.md"
+echo "  2. Client: load extension/dist/chrome (Chrome) or extension/dist/firefox (Firefox),"
+echo "     enter your gateway host + credentials in Options — see docs/SETUP-CLIENT.md"
