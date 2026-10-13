@@ -62,13 +62,24 @@ grep -l "__GATEWAY" releases/*.zip && echo "FAIL: плейсхолдер в па
 
 | Поле | Значение |
 |---|---|
-| **Название** (все языки) | `Claude Gateway` |
+| **Название** (все языки) | `Gateway Connector for Claude` |
 | **Краткое описание** (≤132 симв.) | `Connect your browser to your team’s self-hosted gateway for Claude — fast, native, secure.` |
 | **Описание** (≤16 000 симв.) | Claude Gateway connects your browser to a self-hosted gateway for the Claude web app. Built for teams and organizations that run their own secure gateway.  The extension routes Claude web traffic through your gateway and signs requests with your credentials, so the Claude interface loads fast and renders natively in your browser — full keyboard input, clipboard, and file drag-and-drop, with no remote-desktop streaming or input lag.  Features: • Connect to your own gateway — enter the host once in the options page; a single build works with any domain • Fast, native experience — the web app renders directly in your browser • Credentials stay on your server — the gateway keeps session state on the server side, nothing sensitive is stored in the browser • Team-ready — every member signs in with their own account • Privacy controls for the gateway page — consistent interface settings (UTC time zone, en-US language), geolocation and WebRTC restrictions • Open source — the gateway, extension, server configuration, and tests are published for full review  Setup: requires a running Claude Gateway server (see the project homepage for the installer). An active Claude subscription is required for each user.
 | **Категория** | Productivity |
 | **Язык** | English (United States) |
 | **URL главной страницы** | `https://github.com/JFT-git/claude_for_browes` |
 | **URL службы поддержки** | `https://github.com/JFT-git/claude_for_browes/issues` |
+
+### Обоснование разрешений (Permission justification)
+
+В Chrome Web Store отдельно спросят, зачем нужны разрешения. Вставьте:
+
+| Разрешение | Обоснование |
+|---|---|
+| **Host access (`https://*/*`)** | The user configures their own self-hosted gateway domain in the options page; the extension requests access only to that domain to route Claude traffic through it. |
+| **declarativeNetRequest** | Routes Claude web app requests to the user-configured gateway host and signs them with the user's credentials. |
+| **scripting** | Applies consistent interface settings (UTC time zone, en-US language) and privacy controls on the gateway page. |
+| **storage** | Saves the user's gateway host and credentials locally in the browser. |
 
 ### Графика
 
@@ -94,7 +105,7 @@ grep -l "__GATEWAY" releases/*.zip && echo "FAIL: плейсхолдер в па
 
 | Поле | Значение |
 |---|---|
-| **Name** | `Claude Gateway` |
+| **Name** | `Gateway Connector for Claude` |
 | **Summary** (≤250 симв.) | `Connect your browser to your team’s self-hosted gateway for Claude — fast, native, secure.` |
 | **Description** | Claude Gateway connects your browser to a self-hosted gateway for the Claude web app. Built for teams and organizations that run their own secure gateway.  The extension routes Claude web traffic through your gateway and signs requests with your credentials, so the Claude interface loads fast and renders natively in your browser — full keyboard input, clipboard, and file drag-and-drop, with no remote-desktop streaming or input lag.  Features: • Connect to your own gateway — enter the host once in the options page; a single build works with any domain • Fast, native experience — the web app renders directly in your browser • Credentials stay on your server — the gateway keeps session state on the server side, nothing sensitive is stored in the browser • Team-ready — every member signs in with their own account • Privacy controls for the gateway page — consistent interface settings (UTC time zone, en-US language), geolocation and WebRTC restrictions • Open source — the gateway, extension, server configuration, and tests are published for full review  Setup: requires a running Claude Gateway server (see the project homepage for the installer). An active Claude subscription is required for each user.
 | **Categories** | Privacy & Security, Productivity |
