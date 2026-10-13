@@ -86,9 +86,9 @@ grep -l "__GATEWAY" releases/*.zip && echo "FAIL: плейсхолдер в па
 | Поле | Файл |
 |---|---|
 | **Значок** (128×128) | `extension/icon128.png` |
-| **Скриншот** (1280×800 или 640×400) | `extension/store-assets/screenshot-1.png` |
-| **Мал. промо** (440×280) | `extension/store-assets/promo-440x280.png` |
-| **Больш. промо** (1400×560) | `extension/store-assets/promo-1400x560.png` |
+| **Скриншот** (1280×800 или 640×400) | `extension/store-assets/screenshot-1.jpg (1280×800) или screenshot-1-640.jpg (640×400)` |
+| **Мал. промо** (440×280) | `extension/store-assets/promo-440x280.jpg` |
+| **Больш. промо** (1400×560) | `extension/store-assets/promo-1400x560.jpg` |
 
 ### Дополнительные поля
 
