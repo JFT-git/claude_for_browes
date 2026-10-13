@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gateway Connector for Claude",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "Routes claude.ai through your gateway. Enter your gateway host once \u2014 one build for all domains.",
   "permissions": [
     "declarativeNetRequest",
@@ -27,7 +27,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "claude-gateway@example.invalid",
+      "id": "{3f7a9c2e-8b4d-4e1a-9c5f-2d6b8a4e7f1c}",
       "strict_min_version": "128.0",
       "data_collection_permissions": {
         "required": [
