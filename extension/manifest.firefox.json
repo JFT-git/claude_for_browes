@@ -25,20 +25,6 @@
     "48": "icon48.png",
     "128": "icon128.png"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://__GATEWAY_HOST__/*"
-      ],
-      "js": [
-        "fingerprint.js"
-      ],
-      "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true,
-      "world": "MAIN"
-    }
-  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "claude-gateway@example.invalid",
