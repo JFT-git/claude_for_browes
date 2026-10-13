@@ -23,7 +23,7 @@ jobs:
       - name: Build Chrome + Firefox add-ons
         run: ./configure.sh claude.example.com
       - name: Lint Firefox add-on
-        run: npx --yes web-ext lint --source-dir extension/dist/firefox
+        run: npx --yes web-ext lint --self-hosted --source-dir extension/dist/firefox
       - name: Check no placeholders remain
         run: |
           ! grep -r "__GATEWAY" extension/dist/ || { echo "placeholders leaked into build"; exit 1; }
