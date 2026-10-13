@@ -185,6 +185,19 @@ Chrome Web Store требует аккаунт Google-разработчика (
 
 ---
 
+## Автоподпись Firefox (без браузера)
+
+Один раз получите API-ключи: https://addons.mozilla.org/developers/ → **API Keys** (JWT issuer + secret).
+
+**Локально** — весь цикл одной командой (сборка → подпись на AMO → XPI в GitHub-релиз → `updates.json`):
+```sh
+export AMO_API_KEY=<issuer> AMO_API_SECRET=<secret>
+./extension/sign-firefox.sh
+```
+
+**В CI** — добавьте те же ключи в GitHub: репозиторий → Settings → Secrets and variables → Actions →
+`AMO_API_KEY`, `AMO_API_SECRET`. После этого каждый релиз подписывается и прикрепляется автоматически.
+
 ## Автообновления Firefox (`update_url`)
 
 В манифесте Firefox прописан `update_url` → `updates.json` в корне репозитория (обязателен для

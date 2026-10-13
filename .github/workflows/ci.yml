@@ -74,3 +74,34 @@ jobs:
             releases/claude-gateway-firefox-v$V.zip \
             releases/SHA256SUMS \
             --target main || true
+      - name: Check AMO secrets
+        id: amo
+        run: |
+          if [ -n "${{ secrets.AMO_API_KEY }}" ] && [ -n "${{ secrets.AMO_API_SECRET }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Sign Firefox add-on on AMO (unlisted)
+        if: steps.amo.outputs.present == 'true'
+        env:
+          AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
+          AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+        run: |
+          npx --yes web-ext sign --source-dir extension/dist/firefox \
+            --artifacts-dir extension/dist/amo-signed \
+            --channel unlisted --api-key "$AMO_API_KEY" --api-secret "$AMO_API_SECRET"
+      - name: Attach signed XPI to release + update updates.json
+        if: steps.amo.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          XPI=$(ls extension/dist/amo-signed/*.xpi | head -1)
+          OUT="gateway-connector-firefox-$V.xpi"
+          cp "$XPI" "$OUT"
+          gh release upload "v$V" "$OUT" --clobber
+          python3 extension/update-updates-json.py "$V" updates.json
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add updates.json
+          git commit -m "updates.json: signed xpi for v$V [skip ci]" || true
+          git push
