@@ -355,8 +355,9 @@ function rewriteCsp(csp) {
     out = out.replace(/frame-ancestors([^;]*)/i, (m, g) =>
       g.includes(cfg.publicHost) ? m : "frame-ancestors" + g + " https://" + cfg.publicHost);
   }
-  for (const h of ["assets-proxy.anthropic.com", "assets.claude.ai", "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
-    "www.claudeusercontent.com", "gdrive.claudeusercontent.com", "claudeusercontent.com", "sandbox.claudemcpcontent.com"]) {
+  // NOTE: artifact hosts (claudeusercontent/claudemcpcontent) must stay as-is in CSP —
+  // frame-src has to match the real frame URL; the extension strips frame-ancestors there.
+  for (const h of ["assets-proxy.anthropic.com", "assets.claude.ai", "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com"]) {
     out = out.split(h).join(cfg.publicHost);
   }
   out = out.replace(/\*\.anthropic\.com/g, "*." + cfg.publicHost + " *.anthropic.com");

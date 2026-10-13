@@ -25,12 +25,21 @@ function buildRules(host) {
     { id: 4, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/api.anthropic.com\\1" } },
       condition: { regexFilter: "^https://api\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    // Artifact frames live on per-artifact subdomains (https://<id>.frame.claudeusercontent.com).
+    // Do NOT proxy them (postMessage needs real origins). Instead strip the CSP header that
+    // limits frame-ancestors to claude.ai so they can be embedded from the gateway origin.
     { id: 5, priority: 1,
-      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/\\1\\2" } },
-      condition: { regexFilter: "^https://((?:[^/]+\\.)?claudeusercontent\\.com)(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+      action: { type: "modifyHeaders", responseHeaders: [
+        { header: "content-security-policy", operation: "remove" },
+        { header: "x-frame-options", operation: "remove" }
+      ] },
+      condition: { regexFilter: "^https://([^/]+\\.)?claudeusercontent\\.com/", resourceTypes: ["sub_frame"] } },
     { id: 6, priority: 1,
-      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/\\1\\2" } },
-      condition: { regexFilter: "^https://((?:[^/]+\\.)?claudemcpcontent\\.com)(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+      action: { type: "modifyHeaders", responseHeaders: [
+        { header: "content-security-policy", operation: "remove" },
+        { header: "x-frame-options", operation: "remove" }
+      ] },
+      condition: { regexFilter: "^https://([^/]+\\.)?claudemcpcontent\\.com/", resourceTypes: ["sub_frame"] } },
     { id: 10, priority: 3,
       action: { type: "redirect", redirect: { regexSubstitution: "https://accounts.google.com/\\1claude.ai\\2" } },
       condition: { regexFilter: "^https://accounts\\.google\\.com/(.*)" + esc + "(.*)$", resourceTypes: ["main_frame", "sub_frame"] } },
