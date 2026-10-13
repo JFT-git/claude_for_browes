@@ -65,7 +65,14 @@ const cfg = {
 
 const ALLOWED_HOSTS = new Set([
   "claude.ai", "www.claude.ai", "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com",
+  // artifact frames (their frame-ancestors CSP only allows claude.ai — we rewrite it)
+  "claudeusercontent.com", "www.claudeusercontent.com", "gdrive.claudeusercontent.com",
+  "sandbox.claudemcpcontent.com",
 ]);
+const ALLOWED_SUFFIXES = [".claudeusercontent.com", ".claudemcpcontent.com"];
+function allowedHost(host) {
+  return ALLOWED_HOSTS.has(host) || ALLOWED_SUFFIXES.some(x => host.endsWith(x));
+}
 // Session cookies are sent ONLY to these hosts.
 const COOKIE_HOSTS = new Set(["claude.ai", "www.claude.ai"]);
 
@@ -343,7 +350,13 @@ function rewriteBody(buf, ct) {
 function rewriteCsp(csp) {
   if (!csp) return csp;
   let out = csp;
-  for (const h of ["assets-proxy.anthropic.com", "assets.claude.ai", "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com"]) {
+  // artifact frames must be embeddable from the gateway origin
+  if (/frame-ancestors/i.test(out)) {
+    out = out.replace(/frame-ancestors([^;]*)/i, (m, g) =>
+      g.includes(cfg.publicHost) ? m : "frame-ancestors" + g + " https://" + cfg.publicHost);
+  }
+  for (const h of ["assets-proxy.anthropic.com", "assets.claude.ai", "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
+    "www.claudeusercontent.com", "gdrive.claudeusercontent.com", "claudeusercontent.com", "sandbox.claudemcpcontent.com"]) {
     out = out.split(h).join(cfg.publicHost);
   }
   out = out.replace(/\*\.anthropic\.com/g, "*." + cfg.publicHost + " *.anthropic.com");
@@ -457,7 +470,7 @@ function resolveTarget(rawUrl) {
   if (m) {
     host = m[1].toLowerCase();
     urlPath = m[2] || "/";
-    if (!ALLOWED_HOSTS.has(host)) return null;
+    if (!allowedHost(host)) return null;
   } else { host = "claude.ai"; urlPath = rawUrl; }
   if (!urlPath.startsWith("/")) return null;
   return { host, urlPath };
@@ -616,7 +629,7 @@ function createServer() {
 module.exports = {
   cfg, ALLOWED_HOSTS, COOKIE_HOSTS,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
-  buildUpstreamHeaders, rewriteBody, rewriteCsp, redactPath, createServer,
+  buildUpstreamHeaders, rewriteBody, rewriteCsp, redactPath, createServer, allowedHost,
   seal, unseal, migrateAll, isBanned, recordFail, cleanIp, cacheGet, cachePut, sessionState, noteClaudeResponse, listUsers,
 };
 

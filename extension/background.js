@@ -25,6 +25,12 @@ function buildRules(host) {
     { id: 4, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/api.anthropic.com\\1" } },
       condition: { regexFilter: "^https://api\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    { id: 5, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/\\1\\2" } },
+      condition: { regexFilter: "^https://((?:[^/]+\\.)?claudeusercontent\\.com)(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    { id: 6, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/\\1\\2" } },
+      condition: { regexFilter: "^https://((?:[^/]+\\.)?claudemcpcontent\\.com)(/.*)?$", resourceTypes: RESOURCE_TYPES } },
     { id: 10, priority: 3,
       action: { type: "redirect", redirect: { regexSubstitution: "https://accounts.google.com/\\1claude.ai\\2" } },
       condition: { regexFilter: "^https://accounts\\.google\\.com/(.*)" + esc + "(.*)$", resourceTypes: ["main_frame", "sub_frame"] } },
@@ -40,7 +46,7 @@ async function getConfig() {
 }
 
 async function clearAll() {
-  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,10,11,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
+  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,5,6,10,11,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
   try { await chrome.scripting.unregisterContentScripts({ ids: ["fingerprint"] }); } catch (e) { /* no script yet */ }
 }
 
