@@ -70,6 +70,37 @@ grep -l "__GATEWAY" releases/*.zip && echo "FAIL: плейсхолдер в па
 | **URL главной страницы** | `https://github.com/JFT-git/claude_for_browes` |
 | **URL службы поддержки** | `https://github.com/JFT-git/claude_for_browes/issues` |
 
+### Вкладка «Конфиденциальность» (Privacy practices) — готовые тексты
+
+**Описание цели (Single purpose):**
+```
+Routes traffic to the Claude web app through the user's own self-hosted gateway server.
+```
+
+**declarativeNetRequest:**
+```
+Core functionality of the extension: it redirects requests to claude.ai and its asset domains to the gateway host that the user entered in the options page, and adds the user's basic-auth header to requests sent to that gateway. Without this permission the extension cannot route traffic through the user's gateway.
+```
+
+**scripting:**
+```
+The extension injects a small bundled script on the user's own gateway pages to apply consistent interface settings (UTC time zone, en-US language) and privacy restrictions (geolocation and WebRTC disabled). The script is packaged inside the extension; no code is downloaded at runtime.
+```
+
+**storage:**
+```
+Stores the user's gateway host and credentials locally (chrome.storage.local) so they do not have to be re-entered. The data stays on the user's device and is only sent to the user's own configured gateway server.
+```
+
+**Использование удалённого кода:**
+```
+This extension does not use remotely hosted code. All JavaScript is bundled inside the extension package. The extension only redirects web requests to the user's own server; it never downloads or executes code from remote sources.
+```
+
+**Использование данных:** логин/пароль и домен шлюза хранятся локально в браузере; разработчику не передаются; уходят только на собственный сервер пользователя. Поставьте галочку сертификации.
+
+**Email издателя:** DevConsole → «Настройки» (Account settings) → добавьте email и подтвердите по ссылке из письма.
+
 ### Обоснование разрешений (Permission justification)
 
 В Chrome Web Store отдельно спросят, зачем нужны разрешения. Вставьте:
