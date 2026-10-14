@@ -30,6 +30,9 @@ developer or any third party.
   privacy restrictions (geolocation and WebRTC disabled) on your gateway pages only.
   The script is bundled in the extension; no remote code is downloaded or executed.
 - **storage** — persists your gateway host and credentials locally in the browser.
+- **proxy** — sends document-preview connections (claudeusercontent.com) through your gateway. No other sites are proxied.
+- **webRequest** — notices when the browser asks for the gateway proxy login. Page contents are not read.
+- **webRequestAuthProvider** — submits the gateway username and password you saved, only to your own gateway.
 
 ## Source code
 

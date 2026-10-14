@@ -92,6 +92,21 @@ The extension injects a small bundled script on the user's own gateway pages to 
 Stores the user's gateway host and credentials locally (chrome.storage.local) so they do not have to be re-entered. The data stays on the user's device and is only sent to the user's own configured gateway server.
 ```
 
+**proxy:**
+```
+Sends document-preview connections (claudeusercontent.com) through the gateway server the user configured. The page address stays the real preview host, which the preview requires, while the connection itself goes through the user's gateway. No other sites are proxied.
+```
+
+**webRequest:**
+```
+Used only to notice when the browser asks for credentials for that gateway proxy. The extension does not read page contents or modify requests with this permission.
+```
+
+**webRequestAuthProvider:**
+```
+Fills in the gateway username and password the user already saved, so the preview proxy does not show a second login prompt. Those credentials are sent only to the user's own gateway.
+```
+
 **Использование удалённого кода:**
 ```
 This extension does not use remotely hosted code. All JavaScript is bundled inside the extension package. The extension only redirects web requests to the user's own server; it never downloads or executes code from remote sources.
@@ -118,6 +133,9 @@ https://github.com/JFT-git/claude_for_browes/blob/main/PRIVACY.md
 | **declarativeNetRequest** | Routes Claude web app requests to the user-configured gateway host and signs them with the user's credentials. |
 | **scripting** | Applies consistent interface settings (UTC time zone, en-US language) and privacy controls on the gateway page. |
 | **storage** | Saves the user's gateway host and credentials locally in the browser. |
+| **proxy** | Sends document-preview connections through the user's own gateway. No other sites are proxied. |
+| **webRequest** | Detects when the browser asks for the gateway proxy login. Does not read page contents. |
+| **webRequestAuthProvider** | Submits the saved gateway username and password to the user's own gateway proxy. |
 
 ### Графика
 
