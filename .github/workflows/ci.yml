@@ -86,9 +86,19 @@ jobs:
           AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
           AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
         run: |
+          set +e
           npx --yes web-ext sign --source-dir extension/dist/firefox \
             --artifacts-dir extension/dist/amo-signed \
-            --channel unlisted --api-key "$AMO_API_KEY" --api-secret "$AMO_API_SECRET"
+            --channel unlisted --api-key "$AMO_API_KEY" --api-secret "$AMO_API_SECRET" > /tmp/amo-sign.txt 2>&1
+          code=$?
+          cat /tmp/amo-sign.txt
+          if [ "$code" -ne 0 ]; then
+            if grep -q "Conflict" /tmp/amo-sign.txt; then
+              echo "This Firefox version is already signed — continuing"
+              exit 0
+            fi
+            exit "$code"
+          fi
       - name: Attach signed XPI to release + update updates.json
         if: steps.amo.outputs.present == 'true'
         env:
@@ -107,6 +117,7 @@ jobs:
           git push
       - name: Check Chrome Web Store secrets
         id: cws
+        if: always()
         run: |
           if [ -n "${{ secrets.CWS_CLIENT_ID }}" ] && [ -n "${{ secrets.CWS_CLIENT_SECRET }}" ] \
             && [ -n "${{ secrets.CWS_REFRESH_TOKEN }}" ] && [ -n "${{ secrets.CWS_PUBLISHER_ID }}" ] \
@@ -114,7 +125,7 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Publish Chrome add-on
-        if: steps.cws.outputs.present == 'true'
+        if: always() && steps.cws.outputs.present == 'true'
         env:
           CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
           CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
