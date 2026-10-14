@@ -3,6 +3,10 @@
     "{3f7a9c2e-8b4d-4e1a-9c5f-2d6b8a4e7f1c}": {
       "updates": [
         {
+          "version": "1.8.11",
+          "update_link": "https://github.com/JFT-git/claude_for_browes/releases/download/v1.8.11/gateway-connector-firefox-1.8.11.xpi"
+        },
+        {
           "version": "1.8.10",
           "update_link": "https://github.com/JFT-git/claude_for_browes/releases/download/v1.8.10/gateway-connector-firefox-1.8.10.xpi"
         },
