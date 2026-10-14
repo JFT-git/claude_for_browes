@@ -105,7 +105,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V="${{ steps.ver.outputs.version }}"
-          XPI=$(ls extension/dist/amo-signed/*.xpi | head -1)
+          XPI=$(ls extension/dist/amo-signed/*.xpi 2>/dev/null | head -1)
+          if [ -z "$XPI" ]; then
+            echo "No new signed XPI — this version is already on AMO"
+            exit 0
+          fi
           OUT="gateway-connector-firefox-$V.xpi"
           cp "$XPI" "$OUT"
           gh release upload "v$V" "$OUT" --clobber
