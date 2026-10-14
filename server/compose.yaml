@@ -16,14 +16,21 @@ services:
       ADMIN_USERS: ${ADMIN_USERS:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      # CONNECT tunnel for artifact hosts. Advertise the server's public ip:port
+      # (not the Cloudflare hostname — Cloudflare does not forward CONNECT).
+      CONNECT_PORT: "8089"
+      CONNECT_ADVERTISE: ${CONNECT_ADVERTISE:-}
     volumes:
       - ./gateway/src:/app:ro
       # writable: the gateway stores each user's session cookies here
       - ./gateway/cookies:/cookies
       # ready-made browser extension packages served at /__ext/ (behind basic_auth)
       - ./extension:/ext:ro
-    # hardening: no extra privileges, read-only root fs, no published ports
-    # (reachable only from caddy over the internal docker network)
+    # CONNECT proxy for artifact hosts. Plain HTTP to the server IP; the browser's
+    # TLS to claudeusercontent.com is tunneled inside it, so the payload stays encrypted.
+    ports:
+      - "127.0.0.1:8888:8089"
+    # hardening: no extra privileges, read-only root fs
     read_only: true
     tmpfs:
       - /tmp

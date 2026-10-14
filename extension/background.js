@@ -109,7 +109,28 @@ async function applyRules() {
     console.error("[gateway] content script registration failed:", e && e.message);
   }
 
+  proxyUser = cfg.user;
+  proxyPass = cfg.pass;
   return { ok: true };
+}
+
+let proxyUser = "";
+let proxyPass = "";
+let proxyEndpoint = "";
+
+function applyConnectProxy(addr) {
+  if (!addr || addr === proxyEndpoint) return;
+  const i = addr.lastIndexOf(":");
+  if (i < 1) return;
+  proxyEndpoint = addr;
+  // Firefox routes per request via proxy.onRequest. Chrome uses a profile PAC.
+  if (typeof browser !== "undefined" && browser.proxy && browser.proxy.onRequest) return;
+  if (!chrome.proxy || !chrome.proxy.settings) return;
+  const pac = "function FindProxyForURL(url, host) {\n" +
+    "  if (dnsDomainIs(host, \"claudeusercontent.com\") || dnsDomainIs(host, \"claudemcpcontent.com\"))\n" +
+    "    return \"PROXY " + addr.slice(0, i) + ":" + addr.slice(i + 1) + "\";\n" +
+    "  return \"DIRECT\";\n}";
+  chrome.proxy.settings.set({ value: { mode: "pac_script", pacScript: { data: pac } }, scope: "regular" }, () => {});
 }
 
 async function requestHostPermission() {
@@ -138,7 +159,10 @@ async function healthCheck() {
     clearTimeout(t);
     if (res.status === 200) {
       const body = await res.json().catch(() => ({}));
-      return { ok: true, status: 200, users: body.users, session: body.session };
+      proxyUser = cfg.user;
+      proxyPass = cfg.pass;
+      if (body.connectProxy) applyConnectProxy(body.connectProxy);
+      return { ok: true, status: 200, users: body.users, session: body.session, connectProxy: body.connectProxy || null };
     }
     if (res.status === 401) return { ok: false, status: 401, reason: "auth_failed" };
     return { ok: false, status: res.status, reason: "http_" + res.status };
@@ -163,6 +187,26 @@ async function status() {
     ruleCount = dr.length;
   } catch (e) { /* ignore */ }
   return { host: cfg.host, granted, fingerprint: fpRegistered, rules: ruleCount, configured: !!(cfg.host && cfg.user && cfg.pass) };
+}
+
+function onProxyAuth(details, callback) {
+  const creds = (details.isProxy && proxyUser) ? { authCredentials: { username: proxyUser, password: proxyPass } } : {};
+  if (typeof callback === "function") callback(creds);
+  return creds;
+}
+try {
+  chrome.webRequest.onAuthRequired.addListener(onProxyAuth, { urls: ["<all_urls>"] }, ["asyncBlocking"]);
+} catch (e) {
+  try { chrome.webRequest.onAuthRequired.addListener(onProxyAuth, { urls: ["<all_urls>"] }, ["blocking"]); } catch (e2) { /* no proxy auth */ }
+}
+if (typeof browser !== "undefined" && browser.proxy && browser.proxy.onRequest) {
+  browser.proxy.onRequest.addListener((details) => {
+    let host = "";
+    try { host = new URL(details.url).hostname; } catch (e) { return { type: "direct" }; }
+    if (!proxyEndpoint || !/(^|\.)claudeusercontent\.com$|(^|\.)claudemcpcontent\.com$/i.test(host)) return { type: "direct" };
+    const i = proxyEndpoint.lastIndexOf(":");
+    return { type: "http", host: proxyEndpoint.slice(0, i), port: parseInt(proxyEndpoint.slice(i + 1), 10) };
+  }, { urls: ["<all_urls>"] });
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

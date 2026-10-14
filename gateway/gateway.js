@@ -24,6 +24,7 @@
 "use strict";
 const http = require("http");
 const https = require("https");
+const net = require("net");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -57,6 +58,11 @@ const cfg = {
   // optional Telegram alerts
   tgToken: process.env.TELEGRAM_BOT_TOKEN || "",
   tgChat: process.env.TELEGRAM_CHAT_ID || "",
+  // CONNECT proxy (artifact hosts only). Advertised to the extension as ip:port.
+  connectPort: parseInt(process.env.CONNECT_PORT || "0", 10),
+  connectAdvertise: process.env.CONNECT_ADVERTISE || "",
+  connectAuthHost: process.env.CONNECT_AUTH_HOST || "caddy",
+  connectAuthPort: parseInt(process.env.CONNECT_AUTH_PORT || "443", 10),
   upstreamIdleMs: parseInt(process.env.UPSTREAM_TIMEOUT_MS || "120000", 10),
   maxRewriteBytes: parseInt(process.env.MAX_REWRITE_BYTES || String(20 * 1024 * 1024), 10),
   maxCookies: 100,
@@ -542,7 +548,7 @@ function createServer() {
     }
     const user = sanitizeUser(req.headers["x-remote-user"]);
     if (pathOnly === "/__health") {
-      return json(res, 200, { ok: true, users: jars.size, user: user, session: user ? sessionState(user) : "none" });
+      return json(res, 200, { ok: true, users: jars.size, user: user, session: user ? sessionState(user) : "none", connectProxy: cfg.connectAdvertise || null });
     }
     if (pathOnly === "/__admin/status") {
       if (!user || !cfg.adminUsers.includes(user)) { res.writeHead(403); return res.end("forbidden"); }
@@ -637,13 +643,77 @@ function createServer() {
     req.pipe(proxyReq); // stream the body — no buffering of uploads
   });
   server.on("upgrade", handleUpgrade);
+  server.on("connect", handleConnect);
   return server;
+}
+
+// Artifact iframes must keep their real origin (postMessage checks it) while the
+// TCP connection comes from this server, so the user's IP is not revealed.
+function isArtifactProxyHost(host) {
+  host = String(host || "").toLowerCase().replace(/\.$/, "");
+  return host === "claudeusercontent.com" || host.endsWith(".claudeusercontent.com")
+    || host === "claudemcpcontent.com" || host.endsWith(".claudemcpcontent.com");
+}
+
+const connectAuthCache = new Map();
+function verifyProxyAuth(header) {
+  const now = Date.now();
+  const hit = connectAuthCache.get(header);
+  if (hit && hit.exp > now) return Promise.resolve(hit.ok);
+  return new Promise((resolve) => {
+    const r = https.request({
+      hostname: cfg.connectAuthHost, port: cfg.connectAuthPort, path: "/__health", method: "GET", timeout: 4000,
+      servername: cfg.publicHost, rejectUnauthorized: false,
+      headers: { host: cfg.publicHost, authorization: header },
+    }, (res) => {
+      res.resume();
+      const ok = res.statusCode === 200;
+      connectAuthCache.set(header, { ok, exp: now + 60000 });
+      if (connectAuthCache.size > 500) connectAuthCache.clear();
+      resolve(ok);
+    });
+    r.on("error", () => resolve(false));
+    r.on("timeout", () => { r.destroy(); resolve(false); });
+    r.end();
+  });
+}
+
+function handleConnect(req, socket, head) {
+  socket.on("error", () => socket.destroy());
+  const target = String(req.url || "");
+  const colon = target.lastIndexOf(":");
+  const host = (colon > 0 ? target.slice(0, colon) : target).toLowerCase();
+  const port = parseInt(colon > 0 ? target.slice(colon + 1) : "443", 10);
+  const deny = (code, extra) => socket.end("HTTP/1.1 " + code + "\r\n" + (extra || "") + "connection: close\r\ncontent-length: 0\r\n\r\n");
+  if (!isArtifactProxyHost(host) || port !== 443) { deny("403 Forbidden"); return; }
+  const auth = req.headers["proxy-authorization"] || req.headers["authorization"] || "";
+  const basic = String(auth).replace(/^Basic\s+/i, "");
+  if (!basic) { deny("407 Proxy Authentication Required", 'proxy-authenticate: Basic realm="gateway"\r\n'); return; }
+  verifyProxyAuth("Basic " + basic).then((ok) => {
+    if (socket.destroyed) return;
+    if (!ok) { deny("407 Proxy Authentication Required", 'proxy-authenticate: Basic realm="gateway"\r\n'); return; }
+    const up = net.connect(443, host, () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head && head.length) up.write(head);
+      up.pipe(socket); socket.pipe(up);
+      console.log("[connect] " + host);
+    });
+    up.on("error", () => socket.destroy());
+    socket.on("close", () => up.destroy());
+    up.on("close", () => socket.destroy());
+  });
+}
+
+function createConnectServer() {
+  const s = http.createServer((req, res) => { res.writeHead(405); res.end("connect only"); });
+  s.on("connect", handleConnect);
+  return s;
 }
 
 module.exports = {
   cfg, ALLOWED_HOSTS, COOKIE_HOSTS,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
-  buildUpstreamHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, allowedHost,
+  buildUpstreamHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost,
   seal, unseal, migrateAll, isBanned, recordFail, cleanIp, cacheGet, cachePut, sessionState, noteClaudeResponse, listUsers,
 };
 
@@ -654,4 +724,8 @@ if (require.main === module) {
     "; telegram: " + (cfg.tgToken ? "on" : "off") + "; admins: " + (cfg.adminUsers.join(",") || "-"));
   createServer().listen(cfg.port, cfg.listen, () =>
     console.log("[gateway] listening on " + cfg.listen + ":" + cfg.port + " public host " + cfg.publicHost));
+  if (cfg.connectPort) {
+    createConnectServer().listen(cfg.connectPort, cfg.listen, () =>
+      console.log("[gateway] CONNECT proxy on :" + cfg.connectPort + " advertised " + (cfg.connectAdvertise || "(unset)")));
+  }
 }
