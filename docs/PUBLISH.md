@@ -172,16 +172,30 @@ npx web-ext sign --source-dir extension/dist/firefox \
 
 ---
 
-## Шаг 6. Подпись Chrome
+## Публикация Chrome из CI
 
-Chrome Web Store требует аккаунт Google-разработчика ($5). Без него:
-- Загрузите `releases/claude-gateway-chrome-v1.7.0.zip` в DevConsole (Шаг 1).
-- После проверки (1–3 дня) расширение появится в Web Store.
-- Пользователи ставят по прямой ссылке (unlisted).
+Первый черновик в Chrome Web Store создаётся руками (вкладки «Описание» и «Конфиденциальность» должны быть заполнены). Дальше каждую новую версию CI загружает сам и отправляет на проверку. На аккаунте Google должна быть включена двухэтапная проверка.
 
-**Если не хотите платить $5**, есть обходной путь:**
-- Enterprise-политика: `ExtensionInstallForcelist` в GPO/MDM, расширение ставится из `.crx` по прямой ссылке.
-- Это работает только для управляемых устройств (Enterprise).
+Один раз, в [Google Cloud Console](https://console.cloud.google.com/):
+
+1. Создайте проект и включите **Chrome Web Store API** (поиск по этому имени → Enable).
+2. **OAuth consent screen** → External → заполните название и email. Добавьте свой email в **Test users**. Чтобы токен не протухал через 7 дней, переведите экран в **In production** (если Google потребует верификацию приложения — оставьте Testing и обновляйте токен раз в неделю).
+3. **Credentials → Create credentials → OAuth client ID** → тип **Web application**. В Authorized redirect URIs добавьте `https://developers.google.com/oauthplayground`. Сохраните **Client ID** и **Client secret**.
+4. Откройте [OAuth Playground](https://developers.google.com/oauthplayground). Шестерёнка справа сверху → **Use your own OAuth credentials** → вставьте Client ID и secret. В поле scope впишите `https://www.googleapis.com/auth/chromewebstore` → **Authorize APIs** (войдите тем Google-аккаунтом, которым владеете магазином) → **Exchange authorization code for tokens**. Скопируйте **Refresh token**.
+5. **Publisher ID** — в [DevConsole](https://chrome.google.com/webstore/devconsole/) → Account → Publisher settings.
+6. **Extension ID** карточки «Gateway Connector for Chrome» — `gimbjmikcifpmiiohgpehkkcknkcccif` (страница пакета, поле «Идентификатор»).
+
+Секреты репозитория (Settings → Secrets and variables → Actions → New repository secret):
+
+| Name | Что вставить |
+|---|---|
+| `CWS_CLIENT_ID` | Client ID |
+| `CWS_CLIENT_SECRET` | Client secret |
+| `CWS_REFRESH_TOKEN` | Refresh token |
+| `CWS_PUBLISHER_ID` | Publisher ID |
+| `CWS_EXTENSION_ID` | `gimbjmikcifpmiiohgpehkkcknkcccif` |
+
+После этого пуш в `main` с **новой** версией в манифесте сам загружает zip и отправляет его на проверку. Повторная загрузка той же версии пропускается. Локально то же самое: `./extension/publish-chrome.sh` (предварительно `export` пяти переменных и `./extension/release.sh`).
 
 ---
 

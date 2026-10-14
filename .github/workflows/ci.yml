@@ -105,3 +105,20 @@ jobs:
           git add updates.json
           git commit -m "updates.json: signed xpi for v$V [skip ci]" || true
           git push
+      - name: Check Chrome Web Store secrets
+        id: cws
+        run: |
+          if [ -n "${{ secrets.CWS_CLIENT_ID }}" ] && [ -n "${{ secrets.CWS_CLIENT_SECRET }}" ] \
+            && [ -n "${{ secrets.CWS_REFRESH_TOKEN }}" ] && [ -n "${{ secrets.CWS_PUBLISHER_ID }}" ] \
+            && [ -n "${{ secrets.CWS_EXTENSION_ID }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish Chrome add-on
+        if: steps.cws.outputs.present == 'true'
+        env:
+          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          CWS_PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+        run: ./extension/publish-chrome.sh
