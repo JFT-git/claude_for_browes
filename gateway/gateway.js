@@ -65,7 +65,8 @@ const cfg = {
 
 const ALLOWED_HOSTS = new Set([
   "claude.ai", "www.claude.ai", "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com",
-  // artifact frames (their frame-ancestors CSP only allows claude.ai — we rewrite it)
+  "a.claude.ai", "a-cdn.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
+  // reachable via /p/ if asked, but their URLs are NOT rewritten (iframes must keep their origin)
   "claudeusercontent.com", "www.claudeusercontent.com", "gdrive.claudeusercontent.com",
   "sandbox.claudemcpcontent.com",
 ]);
@@ -337,14 +338,26 @@ const DROP_RESPONSE = new Set(["set-cookie", "report-to", "reporting-endpoints",
 
 function pub(h, p) { return "https://" + cfg.publicHost + (h === "claude.ai" ? "" : "/p/" + h) + p; }
 
+// Hosts whose URLs are rewritten to the gateway. Artifact hosts are deliberately absent:
+// PDF/artifact iframes must keep their real origin (postMessage checks it); the extension
+// only strips their frame-ancestors CSP so the gateway page can embed them.
+const REWRITE_HOSTS = [
+  "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com",
+  "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
+];
+
+function rewriteUrls(s) {
+  for (const h of REWRITE_HOSTS) {
+    const re = h.replace(/\./g, "\\.");
+    s = s.replace(new RegExp("https?:\\/\\/" + re, "g"), pub(h, ""));       // plain
+    s = s.replace(new RegExp("https?:\\\\/\\\\/" + re, "g"), pub(h, "").replace(/\//g, "\\/")); // JSON-escaped
+  }
+  return s;
+}
+
 function rewriteBody(buf, ct) {
   if (!ct || !(ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript"))) return buf;
-  let s = buf.toString("utf8");
-  for (const h of ALLOWED_HOSTS) {
-    if (h === "claude.ai") continue;
-    s = s.replace(new RegExp("https?://" + h.replace(/\./g, "\\."), "g"), pub(h, ""));
-  }
-  return Buffer.from(s, "utf8");
+  return Buffer.from(rewriteUrls(buf.toString("utf8")), "utf8");
 }
 
 function rewriteCsp(csp) {
@@ -575,9 +588,9 @@ function createServer() {
         noteClaudeResponse(user, urlPath, up.statusCode, sentSession);
       }
       if (rh["content-security-policy"]) rh["content-security-policy"] = rewriteCsp(rh["content-security-policy"]);
-      if (rh["location"]) {
-        for (const h of ALLOWED_HOSTS) rh["location"] = rh["location"].replace(new RegExp("https?://" + h.replace(/\./g, "\\."), "g"), pub(h, ""));
-      }
+      const rewriteHeader = (v) => Array.isArray(v) ? v.map(rewriteUrls) : rewriteUrls(v);
+      if (rh["location"]) rh["location"] = rewriteHeader(rh["location"]);
+      if (rh["link"]) rh["link"] = rewriteHeader(rh["link"]);
 
       const ct = String(rh["content-type"] || "");
       const rewritable = ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript");
@@ -630,7 +643,7 @@ function createServer() {
 module.exports = {
   cfg, ALLOWED_HOSTS, COOKIE_HOSTS,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
-  buildUpstreamHeaders, rewriteBody, rewriteCsp, redactPath, createServer, allowedHost,
+  buildUpstreamHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, allowedHost,
   seal, unseal, migrateAll, isBanned, recordFail, cleanIp, cacheGet, cachePut, sessionState, noteClaudeResponse, listUsers,
 };
 

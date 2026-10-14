@@ -25,6 +25,18 @@ function buildRules(host) {
     { id: 4, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/api.anthropic.com\\1" } },
       condition: { regexFilter: "^https://api\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    { id: 7, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/s-cdn.anthropic.com\\1" } },
+      condition: { regexFilter: "^https://s-cdn\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    { id: 8, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/a-cdn.anthropic.com\\1" } },
+      condition: { regexFilter: "^https://a-cdn\\.anthropic\\.com(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    { id: 9, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/a.claude.ai\\1" } },
+      condition: { regexFilter: "^https://a\\.claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    { id: 12, priority: 1,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/a-cdn.claude.ai\\1" } },
+      condition: { regexFilter: "^https://a-cdn\\.claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES } },
     // Artifact frames live on per-artifact subdomains (https://<id>.frame.claudeusercontent.com).
     // Do NOT proxy them (postMessage needs real origins). Instead strip the CSP header that
     // limits frame-ancestors to claude.ai so they can be embedded from the gateway origin.
@@ -55,7 +67,7 @@ async function getConfig() {
 }
 
 async function clearAll() {
-  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,5,6,10,11,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
+  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,5,6,7,8,9,10,11,12,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
   try { await chrome.scripting.unregisterContentScripts({ ids: ["fingerprint"] }); } catch (e) { /* no script yet */ }
 }
 

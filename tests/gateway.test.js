@@ -67,6 +67,15 @@ test("logs never contain query strings", () => {
 
 
 
+test("artifact urls stay real, asset urls (incl. JSON-escaped) are rewritten", () => {
+  const js = 'var a="https://www.claudeusercontent.com/x";var b="https:\\/\\/assets-proxy.anthropic.com\\/a.js";var c="https://s-cdn.anthropic.com/s.js";';
+  const out = g.rewriteBody(Buffer.from(js), "application/javascript").toString();
+  assert.match(out, /https:\/\/www\.claudeusercontent\.com\/x/);
+  assert.ok(!out.includes("https:\\/\\/assets-proxy.anthropic.com"));
+  assert.ok(out.includes("gw.example.org\\/p\\/assets-proxy.anthropic.com"));
+  assert.match(out, /\/p\/s-cdn\.anthropic\.com\/s\.js/);
+});
+
 test("csp and body rewriting", () => {
   assert.match(g.rewriteCsp("script-src https://assets-proxy.anthropic.com"), /gw\.example\.org/);
   const out = g.rewriteBody(Buffer.from('<script src="https://assets-proxy.anthropic.com/a.js">'), "text/html").toString();
