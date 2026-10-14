@@ -118,7 +118,7 @@ This extension does not use remotely hosted code. All JavaScript is bundled insi
 
 **Политика конфиденциальности:** обязательна, т.к. отмечены данные для аутентификации. URL:
 ```
-https://github.com/JFT-git/claude_for_browes/blob/main/PRIVACY.md
+https://claude.jft-foruse.com/privacy
 ```
 
 **Email издателя:** DevConsole → «Настройки» (Account settings) → добавьте email и подтвердите по ссылке из письма.

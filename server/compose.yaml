@@ -49,6 +49,7 @@ services:
       - 443:443
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./privacy.html:/srv/privacy/index.html:ro
       - caddy-data:/data
       - caddy-config:/config
     cap_drop:

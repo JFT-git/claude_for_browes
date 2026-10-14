@@ -22,6 +22,14 @@ __DOMAIN__ {
         respond 404
     }
 
+    # Public privacy policy for the extension listing. No login, so store review can fetch it.
+    handle /privacy {
+        root * /srv/privacy
+        rewrite * /index.html
+        header Content-Type text/html;charset=utf-8
+        file_server
+    }
+
     # Public asset proxy path: NO basic_auth (assets are public JS/CSS/fonts).
     # Avoids 401 on dynamic import() where the browser does not send Authorization.
     @assets path /p/assets-proxy.anthropic.com/* /p/assets.claude.ai/*
