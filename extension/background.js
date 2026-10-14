@@ -37,21 +37,25 @@ function buildRules(host) {
     { id: 12, priority: 1,
       action: { type: "redirect", redirect: { regexSubstitution: "https://" + host + "/p/a-cdn.claude.ai\\1" } },
       condition: { regexFilter: "^https://a-cdn\\.claude\\.ai(/.*)?$", resourceTypes: RESOURCE_TYPES } },
-    // Artifact frames live on per-artifact subdomains (https://<id>.frame.claudeusercontent.com).
-    // Do NOT proxy them (postMessage needs real origins). Instead strip the CSP header that
-    // limits frame-ancestors to claude.ai so they can be embedded from the gateway origin.
+    // Artifact frames (https://<id>.frame.claudeusercontent.com) must keep that origin:
+    // the page postMessages to it. If a cached bundle still points the iframe at
+    // https://<gateway>/p/<that-host>/..., send it back to the real host.
+    { id: 13, priority: 5,
+      action: { type: "redirect", redirect: { regexSubstitution: "https://\\1\\2" } },
+      condition: { regexFilter: "^https://" + esc + "/p/((?:[^/?#]+\\.)*(?:claudeusercontent|claudemcpcontent)\\.com)(/.*)?$", resourceTypes: RESOURCE_TYPES } },
+    // Strip the CSP that only allows embedding from claude.ai. Any subdomain depth.
     { id: 5, priority: 1,
       action: { type: "modifyHeaders", responseHeaders: [
         { header: "content-security-policy", operation: "remove" },
         { header: "x-frame-options", operation: "remove" }
       ] },
-      condition: { regexFilter: "^https://([^/]+\\.)?claudeusercontent\\.com/", resourceTypes: ["sub_frame"] } },
+      condition: { regexFilter: "^https://(?:[^/]+\\.)*claudeusercontent\\.com/", resourceTypes: ["sub_frame", "main_frame"] } },
     { id: 6, priority: 1,
       action: { type: "modifyHeaders", responseHeaders: [
         { header: "content-security-policy", operation: "remove" },
         { header: "x-frame-options", operation: "remove" }
       ] },
-      condition: { regexFilter: "^https://([^/]+\\.)?claudemcpcontent\\.com/", resourceTypes: ["sub_frame"] } },
+      condition: { regexFilter: "^https://(?:[^/]+\\.)*claudemcpcontent\\.com/", resourceTypes: ["sub_frame", "main_frame"] } },
     { id: 10, priority: 3,
       action: { type: "redirect", redirect: { regexSubstitution: "https://accounts.google.com/\\1claude.ai\\2" } },
       condition: { regexFilter: "^https://accounts\\.google\\.com/(.*)" + esc + "(.*)$", resourceTypes: ["main_frame", "sub_frame"] } },
@@ -67,7 +71,7 @@ async function getConfig() {
 }
 
 async function clearAll() {
-  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,5,6,7,8,9,10,11,12,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
+  try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1,2,3,4,5,6,7,8,9,10,11,12,13,AUTH_RULE_ID] }); } catch (e) { /* no rules yet */ }
   try { await chrome.scripting.unregisterContentScripts({ ids: ["fingerprint"] }); } catch (e) { /* no script yet */ }
 }
 
