@@ -319,7 +319,7 @@ function artifactDebuggerFixture({ rejectAttach = false, attachHook, detachHook,
   };
   const context = vm.createContext({ chrome, URL, TextEncoder, Date, setTimeout, clearTimeout,
     btoa: text => Buffer.from(text, "latin1").toString("base64") });
-  for (const file of ["privacy-rules.js", "artifact-csp.js", "artifact-debugger.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../extension/" + file), "utf8"), context);
+  for (const file of ["privacy-rules.js", "artifact-csp.js", "artifact-cors.js", "artifact-debugger.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../extension/" + file), "utf8"), context);
   context.isReady = () => ready;
   context.onUnsafeDetach = () => { unsafeCount++; ready = false; manager.stop().catch(() => {}); };
   manager = vm.runInContext("GatewayArtifactDebugger.create({chrome,isReady,onUnsafeDetach})", context);
@@ -406,6 +406,88 @@ test("a transient foreign tab URL retains ownership only with an authoritative g
     f.chrome.tabs.onUpdated.emit(1, { status: "loading" }, f.tab);
     await f.flush(() => f.calls.some(call => call.method === "detach"));
     assert.equal(f.manager.status().attachedTabs, 0);
+  }
+});
+
+test("CORS export pairs only an exact gateway initiating frame and streams the response headers", async () => {
+  const f = artifactDebuggerFixture(); await f.manager.configure("gateway.example.test");
+  const request = f.paused({ frameId: "root", resourceType: "Fetch", responseStatusCode: undefined, responseHeaders: undefined,
+    request: { url: f.frameURL, method: "GET", headers: { Origin: "https://gateway.example.test", Accept: "text/html" } } });
+  f.emit({ tabId: 1 }, "Fetch.requestPaused", request);
+  await f.flush(() => f.calls.some(call => call.method === "Fetch.continueRequest" && call.params.interceptResponse));
+  const continued = f.calls.find(call => call.method === "Fetch.continueRequest" && call.params.interceptResponse).params;
+  assert.equal(continued.headers.find(header => header.name.toLowerCase() === "origin").value, "https://claude.ai");
+  f.emit({ tabId: 1 }, "Fetch.requestPaused", { ...request, responseStatusCode: 200, responseHeaders: [
+    { name: "Access-Control-Allow-Origin", value: "https://claude.ai" }, { name: "Vary", value: "Origin" },
+    { name: "Content-Length", value: String(32 * 1024 * 1024) }, { name: "Content-Encoding", value: "gzip" }
+  ] });
+  await f.flush(() => f.calls.some(call => call.method === "Fetch.continueResponse"));
+  const response = f.calls.find(call => call.method === "Fetch.continueResponse").params;
+  assert.equal(response.responseHeaders[0].value, "https://gateway.example.test");
+  assert.equal(response.responseHeaders[2].value, String(32 * 1024 * 1024));
+  assert.equal(response.responseHeaders[3].value, "gzip");
+  assert.equal(f.calls.some(call => ["Fetch.takeResponseBodyAsStream", "IO.read", "Fetch.fulfillRequest"].includes(call.method)), false);
+  await f.manager.stop();
+});
+
+test("CORS export leaves artifact child initiators unchanged and rejects changed or redirected pairs", async () => {
+  const f = artifactDebuggerFixture(); await f.manager.configure("gateway.example.test");
+  const request = f.paused({ requestId: "cors-request", frameId: "artifact", resourceType: "XHR", responseStatusCode: undefined, responseHeaders: undefined,
+    request: { url: f.frameURL, method: "GET", headers: { Origin: "https://gateway.example.test" } } });
+  f.emit({ tabId: 1 }, "Fetch.requestPaused", request);
+  await f.flush(() => f.calls.some(call => call.method === "Fetch.continueRequest"));
+  assert.equal(f.calls.some(call => call.params?.interceptResponse), false, "a gateway Origin header alone never authorizes an artifact initiating frame");
+  request.frameId = "root";
+  for (const mode of ["redirect", "changed-url", "configuration"]) {
+    const id = mode;
+    f.emit({ tabId: 1 }, "Fetch.requestPaused", { ...request, requestId: id });
+    await f.flush(() => f.calls.some(call => call.params?.requestId === id && call.params.interceptResponse));
+    if (mode === "configuration") { await f.manager.stop(); }
+    f.emit({ tabId: 1 }, "Fetch.requestPaused", { ...request, requestId: id, responseStatusCode: mode === "redirect" ? 302 : 200,
+      request: { ...request.request, url: mode === "changed-url" ? f.frameURL + "/changed" : f.frameURL },
+      responseHeaders: [{ name: "Access-Control-Allow-Origin", value: "https://claude.ai" }] });
+    await f.flush(() => f.calls.some(call => call.method === "Fetch.failRequest" && call.params.requestId === id));
+  }
+  assert.equal(f.calls.some(call => call.method === "Fetch.continueResponse"), false);
+});
+
+test("concurrent export pauses cannot exceed the paired request bound after tab lookup", async () => {
+  const f = artifactDebuggerFixture(); await f.manager.configure("gateway.example.test");
+  let release; const pending = new Promise(resolve => { release = resolve; }); let gets = 0;
+  const get = f.chrome.tabs.get;
+  f.chrome.tabs.get = async id => { gets++; await pending; return get(id); };
+  for (let index = 0; index < 129; index++) f.emit({ tabId: 1 }, "Fetch.requestPaused", f.paused({ requestId: "cors-" + index,
+    frameId: "root", resourceType: "Fetch", responseStatusCode: undefined, responseHeaders: undefined,
+    request: { url: f.frameURL, method: "GET", headers: { Origin: "https://gateway.example.test" } } }));
+  await f.flush(() => gets >= 129); release();
+  await f.flush(() => f.calls.filter(call => call.method === "Fetch.continueRequest" && call.params.interceptResponse).length === 128 && f.calls.some(call => call.method === "Fetch.failRequest"));
+  assert.equal(f.calls.filter(call => call.method === "Fetch.continueRequest" && call.params.interceptResponse).length, 128);
+  await f.manager.stop();
+});
+
+test("export frame ownership is rechecked after the final asynchronous tab lookup", async () => {
+  for (const stage of ["request", "response"]) {
+    const f = artifactDebuggerFixture({ treeOverride: { frame: { id: "root", url: "https://gateway.example.test/" }, childFrames: [
+      { frame: { id: "viewer", parentId: "root", url: "https://gateway.example.test/viewer" } }
+    ] } });
+    await f.manager.configure("gateway.example.test");
+    const request = f.paused({ frameId: "viewer", resourceType: "Fetch", responseStatusCode: undefined, responseHeaders: undefined,
+      request: { url: f.frameURL, method: "GET", headers: { Origin: "https://gateway.example.test" } } });
+    if (stage === "response") {
+      f.emit({ tabId: 1 }, "Fetch.requestPaused", request);
+      await f.flush(() => f.calls.some(call => call.params?.interceptResponse));
+    }
+    const get = f.chrome.tabs.get; let gets = 0;
+    f.chrome.tabs.get = async id => {
+      if (++gets === 2) f.emit({ tabId: 1 }, "Page.frameNavigated", { frame: { id: "viewer", parentId: "root", url: "https://foreign.example.test/" } });
+      return get(id);
+    };
+    f.emit({ tabId: 1 }, "Fetch.requestPaused", stage === "response" ? { ...request, responseStatusCode: 200,
+      responseHeaders: [{ name: "Access-Control-Allow-Origin", value: "https://claude.ai" }] } : request);
+    await f.flush(() => f.calls.some(call => call.method === "Fetch.failRequest"));
+    assert.equal(f.calls.some(call => call.method === "Fetch.continueResponse"), false);
+    if (stage === "request") assert.equal(f.calls.some(call => call.params?.interceptResponse), false);
+    await f.manager.stop();
   }
 });
 

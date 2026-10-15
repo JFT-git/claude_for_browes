@@ -141,7 +141,7 @@ bash install.sh
 2. Пока расширение активно, оно ограничивает сетевые запросы этого профиля: неизвестные внешние адреса, открытые из Claude, блокируются; WebRTC privacy policy также относится ко всему профилю.
 3. Не используйте защищаемый профиль для обычного веб-сёрфинга или других приложений.
 
-Не используйте пакеты из `releases/` с версией 1.8.14: они предшествуют защищённому CONNECT-маршруту. Используйте Chromium-сборку версии 2.0.3 или новее и Chrome 125+; Firefox 140+ остаётся fail-closed для artifact CONNECT.
+Не используйте пакеты из `releases/` с версией 1.8.14: они предшествуют защищённому CONNECT-маршруту. Используйте Chromium-сборку версии 2.0.4 или новее и Chrome 125+; Firefox 140+ остаётся fail-closed для artifact CONNECT.
 
 ### Шаг 2. Установите расширение
 
@@ -207,7 +207,7 @@ Firefox manifest требует ≥ 140, но Firefox не поддержива�
 - Default runtime logger Caddy удаляет request URI и headers, включая query/cookies/auth headers; диагностические сообщения и логи других компонентов отдельно не очищаются. При обновлении Caddyfile пересоздайте контейнер Caddy.
 - Входящие порты: TCP 80 для HTTP-01 и TCP 443 для front door. Gateway 8088/8443 остаются внутренними.
 - Firefox artifact routing fail-closed; OAuth origin mismatch и CSP-ограничения артефактов остаются известными ограничениями.
-- Для 2.0.3 прошли 132 Node.js и 21 Python-тест без пропусков, Firefox lint без замечаний и Chromium native gate 12/12 в синтетической fixture. Синтетические PDF/code attachments сохранили исходные байты, а следующий preview открылся в той же вкладке; это не проверка реальных owner/public PDF или code downloads. Выбранные owner HTML/React/SVG/Mermaid/Markdown/TXT сценарии и 4/5 cold thumbnails относятся к private SSH fixture версии 2.0.2; положительный публичный Basic-auth E2E не выполнялся. Пятый thumbnail совпал с upstream 404. Подробности и непроверенные сценарии — в [SECURITY.md](SECURITY.md).
+- Для 2.0.4 прошли 147 Node.js и 29 Python-тестов без пропусков, Firefox lint без замечаний и integrated native CORS gate 18/18, включая точный synthetic fetch→Blob→download. CORS helper ограничен exact gateway frame/Origin и парой заголовков `Origin`/`Access-Control-Allow-Origin`; CORS path не читает body, не меняет CSP и другие headers. Проверенные archive hashes развернуты, owner health прошёл; публичная проверка владельца после CORS-обновления ещё выполняется. Старый Cloudflare gzip object связан с одной ошибкой декодирования 200 script; исходный URL ещё не очищен вручную, а причина исторических 525 остаётся неизвестной. Результаты 2.0.3 отдельно сохранены в [SECURITY.md](SECURITY.md) и не подтверждают работу 2.0.4.
 - Не считайте выборочную проверку гарантией поддержки всех артефактов или публичного production deployment.
 
 ---

@@ -531,7 +531,7 @@ function extIndexHtml() {
   try { signedFirefox = fs.statSync(path.join(cfg.extDir, "gateway-connector-firefox.xpi")).isFile(); } catch (_) { /* optional package */ }
   return '<!doctype html><meta charset="utf-8"><title>Claude Gateway — extension</title>' +
     '<body style="font-family:-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5">' +
-    '<h2>Claude Gateway — расширение 2.0.3</h2>' +
+    '<h2>Claude Gateway — расширение 2.0.4</h2>' +
     '<p>Создайте отдельный профиль браузера только для шлюза. При активной защите другие внешние сайты и запросы блокируются во всём профиле, включая новые окна и фоновые процессы.</p><ul>' +
     '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge ≥ 125 (zip)</a> — скачайте свежую сборку, распакуйте, откройте <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное».</li>' +
     '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox ≥ 140 (zip, без подписи)</a> — сборка для проверки. Защищённый маршрут артефактов пока не поддерживается и блокирует запросы (fail-closed); полноценная работа файлов и артефактов не подтверждена.</li>' +

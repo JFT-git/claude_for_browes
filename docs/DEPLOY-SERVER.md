@@ -31,6 +31,8 @@ The deploy folder must contain the generated `Caddyfile`, `compose.yaml`, `port4
 
 The generated Caddyfile filters all default Caddy runtime records by deleting the complete `request.uri` and `request.headers` fields (including query, Referer, User-Agent, cookie, and authorization values). Status, method, logger/message, and TLS/ACME diagnostics remain; arbitrary message strings and other components’ logs are not sanitized. When updating an existing deployment, regenerate the Caddyfile and recreate the Caddy container for this filter to take effect.
 
+The front door's optional `FRONTDOOR_DIAGNOSTICS` setting defaults to `0`. Setting it to `1` emits 30-second interval counters for fixed error categories, accepted/active/closed connections, and the active-connection peak; these counters contain no addresses, hostnames, tokens, or traffic contents. Turn it off when the diagnostic run is complete and recreate the frontdoor container to apply the setting.
+
 After start, inspect the actual container health and logs. The installation check should verify domain TLS and authenticated `/__health`; confirm that the public IP TLS certificate is ready before handing out the extension. A successful unit test does not verify the public CONNECT route, Cloudflare forwarding, OAuth, or artifact rendering.
 
 ### Migrating from the legacy systemd port-443 mux
@@ -104,5 +106,5 @@ The CONNECT token expires after 15 minutes and refreshes while the gateway remai
 - Google/Apple OAuth may report `origin_mismatch`; this deployment has no approved workaround.
 - Chromium uses a narrowly scoped debugger path for eligible inline artifact documents opened under the exact gateway origin. For a response that needs a header change, it reads the body in memory up to 8 MiB; oversized or failed rewrites are blocked. `X-Frame-Options` is removed for a rewritten eligible response, while the gateway origin is added to an existing `frame-ancestors` only when it already permits Claude. All CSP policies and other directives are preserved. Responses marked `Content-Disposition: attachment` pass through as native browser downloads without body buffering in this compatibility path; this does not establish that every real artifact or download works. Chrome 125+ is required, the browser shows its debugger banner, and DevTools conflicts fail closed. Firefox artifact previews remain unsupported.
 - Firefox is fail-closed for artifact/dependency proxy traffic pending safe browser lifecycle evidence.
-- Capacity estimates are not documented because representative load measurements are not available.
+- A bounded synthetic front-door load test used the deployment image `python:3.13-alpine` with 256 MiB memory, `pids_limit=320`, and `nofile=1024`: 256 connections were handled, 8 beyond the configured limit were rejected, and the next 16 were accepted after slots freed; peak RSS was 45.6 MiB with no OOM. Production connection capacity was raised from 128 to 256 at 07:50 UTC; timeouts were unchanged. This is one synthetic configuration test, not a capacity guarantee for arbitrary traffic.
 - Read [SECURITY.md](../SECURITY.md) before exposing the service to users.

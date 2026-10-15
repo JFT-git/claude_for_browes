@@ -16,7 +16,7 @@ Gateway password — отдельный пароль для входа в шлю
 
 ## Установите и настройте расширение
 
-Используйте расширение версии 2.0.3 или новее. Minimum Chrome version — 125 из-за поддержки OOPIF в debugger API. Установите актуальную Chromium-сборку с `https://<gateway-host>/__ext/` или получите её у администратора:
+Используйте расширение версии 2.0.4 или новее. Minimum Chrome version — 125 из-за поддержки OOPIF в debugger API. Установите актуальную Chromium-сборку с `https://<gateway-host>/__ext/` или получите её у администратора:
 
 1. Откройте `chrome://extensions` или `edge://extensions`.
 2. Включите **Developer mode** и нажмите **Load unpacked**.

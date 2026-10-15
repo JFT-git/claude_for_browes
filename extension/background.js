@@ -15,7 +15,7 @@ const EGRESS_BLOCK_ID = 2002;
 // importScripts so both builds execute the same destination policy.
 if (typeof importScripts === "function") {
   if (typeof GatewayPrivacy === "undefined") importScripts("privacy-rules.js");
-  importScripts("artifact-csp.js", "artifact-debugger.js");
+  importScripts("artifact-csp.js", "artifact-cors.js", "artifact-debugger.js");
 }
 const { DEPENDENCY_HOSTS, ARTIFACT_DOMAINS, protectedHost, protectedPattern: PROTECTED_PATTERN, RESOURCE_TYPES } = GatewayPrivacy;
 const PROXY_ALLOW_IDS = [PROXY_ALLOW_ID, ...DEPENDENCY_HOSTS.map((_, index) => 2010 + index)];

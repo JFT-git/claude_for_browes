@@ -4,6 +4,7 @@
 (function (root) {
   "use strict";
   const MAX_TABS = 32, MAX_SESSIONS = 256, MAX_FRAMES = 1024, MAX_RESPONSES = 4;
+  const MAX_CORS_REQUESTS = 128, CORS_TIMEOUT_MS = 15000;
   function create({ chrome, isReady, onUnsafeDetach }) {
     const api = chrome.debugger;
     const tabs = new Map(), suppressed = new Set(), detaching = new Map(), attaching = new Map();
@@ -90,6 +91,8 @@
       if (tabs.get(state.tabId) === state) tabs.delete(state.tabId);
       state.active = false;
       state.frames.clear(); state.sessions.clear();
+      for (const pair of state.corsRequests.values()) clearTimeout(pair.timer);
+      state.corsRequests.clear();
       // A rejected/pending attach does not prove ownership. Never detach the
       // debugger belonging to DevTools or another extension to recover it.
       if (!state.nativeAttached) return;
@@ -115,7 +118,7 @@
         if (!current(state)) throw new Error("Artifact configuration changed");
         await command(source, "Page.enable");
         await refreshFrames(state, source);
-        await command(source, "Fetch.enable", { patterns: GatewayArtifactCsp.buildFetchPatterns(), handleAuthRequests: false });
+        await command(source, "Fetch.enable", { patterns: [...GatewayArtifactCsp.buildFetchPatterns(), ...GatewayArtifactCors.buildFetchPatterns()], handleAuthRequests: false });
         await command(source, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: "iframe", exclude: false }] });
         if (!current(state)) throw new Error("Artifact configuration changed");
       } finally {
@@ -131,7 +134,7 @@
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       if (attaching.has(tabId) || !candidateTab(tab)) return;
       if (atCapacity(tabId)) { lastError = "tab_limit"; onUnsafeDetach(); return; }
-      const state = { tabId, host, generation, active: true, ready: false, sessions: new Map(), frames: new Map(), inFlight: 0 };
+      const state = { tabId, host, generation, active: true, ready: false, sessions: new Map(), frames: new Map(), corsRequests: new Map(), inFlight: 0 };
       tabs.set(tabId, state);
       state.setup = (async () => {
         let attached = false;
@@ -164,7 +167,61 @@
       })();
       await state.setup;
     }
+    const corsKey = (source, requestId) => sourceKey(source) + "\0" + requestId;
+    function forgetCors(state, key) {
+      const pair = state.corsRequests.get(key);
+      if (pair) clearTimeout(pair.timer);
+      state.corsRequests.delete(key);
+      return pair;
+    }
+    async function corsPaused(state, source, event) {
+      const key = corsKey(source, event.requestId);
+      const paired = state.corsRequests.get(key);
+      const fail = () => command(source, "Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }).catch(() => {});
+      try {
+        const response = event.responseStatusCode !== undefined || event.responseErrorReason !== undefined;
+        if (response && (!paired || event.responseErrorReason || event.responseStatusCode >= 300 && event.responseStatusCode < 400
+            || event.request?.url !== paired.url)) { forgetCors(state, key); await fail(); return; }
+        if (!await ownedTab(state)) {
+          if (paired) { forgetCors(state, key); await fail(); }
+          else await command(source, "Fetch.continueRequest", { requestId: event.requestId });
+          return;
+        }
+        await refreshFrames(state);
+        if (source.sessionId) await refreshFrames(state, source);
+        if (!current(state)) throw new Error("Artifact configuration changed");
+        const frameUrl = state.frames.get(event.frameId)?.url;
+        if (response) {
+          if (paired !== state.corsRequests.get(key) || paired.frameId !== event.frameId || !ownedURL(frameUrl)) throw new Error("Artifact export frame changed");
+          const headers = GatewayArtifactCors.responseHeaders(event, state.host);
+          forgetCors(state, key);
+          if (!headers) { await command(source, "Fetch.continueRequest", { requestId: event.requestId }); return; }
+          if (!await ownedTab(state) || !current(state) || !ownedURL(state.frames.get(paired.frameId)?.url)) throw new Error("Gateway tab navigated");
+          const params = { requestId: event.requestId, responseCode: event.responseStatusCode, responseHeaders: headers };
+          if (typeof event.responseStatusText === "string") params.responsePhrase = event.responseStatusText;
+          await command(source, "Fetch.continueResponse", params);
+          return;
+        }
+        const headers = GatewayArtifactCors.requestHeaders(event, state.host, frameUrl);
+        if (!headers) { await command(source, "Fetch.continueRequest", { requestId: event.requestId }); return; }
+        if (event.redirectedRequestId || state.corsRequests.size >= MAX_CORS_REQUESTS || paired) { await fail(); return; }
+        if (!await ownedTab(state) || !current(state)) throw new Error("Gateway tab navigated");
+        if (!GatewayArtifactCors.requestHeaders(event, state.host, state.frames.get(event.frameId)?.url)) throw new Error("Artifact export frame changed");
+        // The tab lookup yields; enforce the capacity/identity bound again with
+        // no await between this check and insertion.
+        if (event.redirectedRequestId || state.corsRequests.size >= MAX_CORS_REQUESTS || state.corsRequests.has(key)) { await fail(); return; }
+        const pair = { url: event.request.url, frameId: event.frameId, timer: null };
+        pair.timer = setTimeout(() => {
+          if (state.corsRequests.get(key) !== pair) return;
+          forgetCors(state, key);
+          fail();
+        }, CORS_TIMEOUT_MS);
+        state.corsRequests.set(key, pair);
+        await command(source, "Fetch.continueRequest", { requestId: event.requestId, headers, interceptResponse: true });
+      } catch (_) { forgetCors(state, key); await fail(); }
+    }
     async function paused(state, source, event) {
+      if (["XHR", "Fetch"].includes(event.resourceType)) { await corsPaused(state, source, event); return; }
       // A top-level artifact navigation may become an attachment instead of
       // committing. Chrome can update tab.url before resolving disposition.
       // Preserve the original response on this known active debugger source;
@@ -230,7 +287,11 @@
         catch (_) { await unsafe(state); }
         return;
       }
-      if (method === "Target.detachedFromTarget") { state.sessions.delete(params.sessionId); return; }
+      if (method === "Target.detachedFromTarget") {
+        state.sessions.delete(params.sessionId);
+        for (const key of state.corsRequests.keys()) if (key.startsWith(params.sessionId + "\0")) forgetCors(state, key);
+        return;
+      }
       if (method === "Page.frameAttached") { mergeFrame(state, { id: params.frameId, parentId: params.parentFrameId }); return; }
       if (method === "Page.frameNavigated") {
         mergeFrame(state, params.frame);
@@ -289,7 +350,7 @@
       status() { return { available: supported, attachedTabs: [...tabs.values()].filter(state => state.ready && current(state)).length, blockedTabs: suppressed.size, lastError }; }
     };
   }
-  const api = Object.freeze({ create, MAX_TABS, MAX_SESSIONS, MAX_FRAMES, MAX_RESPONSES });
+  const api = Object.freeze({ create, MAX_TABS, MAX_SESSIONS, MAX_FRAMES, MAX_RESPONSES, MAX_CORS_REQUESTS, CORS_TIMEOUT_MS });
   root.GatewayArtifactDebugger = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);

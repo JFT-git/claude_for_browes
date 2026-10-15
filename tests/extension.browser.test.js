@@ -24,6 +24,11 @@ const PROXY_TOKEN_A = "a".repeat(43);
 const PROXY_TOKEN_B = "b".repeat(43);
 const PROXY_TOKEN_C = "c".repeat(43);
 const THUMBNAIL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC", "base64");
+const CORS_LARGE_FIXTURE = Buffer.alloc(9 * 1024 * 1024);
+for (let index = 0; index < CORS_LARGE_FIXTURE.length; index++) CORS_LARGE_FIXTURE[index] = (index * 31 + 17) & 0xff;
+const CORS_LARGE_SHA256 = crypto.createHash("sha256").update(CORS_LARGE_FIXTURE).digest("hex");
+const CORS_HTML_EXPORT = Buffer.from(`<!doctype html><html><head><meta charset="utf-8"><title>synthetic CORS export</title></head><body><main id="cors-export">PUBLIC_CORS_FETCH_BLOB_EXPORT_READY</main></body></html>\n`, "utf8");
+const CORS_HTML_EXPORT_SHA256 = crypto.createHash("sha256").update(CORS_HTML_EXPORT).digest("hex");
 function proxyTokenVersion(value) {
   return value === PROXY_TOKEN_A ? "A" : value === PROXY_TOKEN_B ? "B" : value === PROXY_TOKEN_C ? "C" : "unknown";
 }
@@ -310,6 +315,14 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
       res.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" });
       return res.end(req.method === "HEAD" ? undefined : "/* synthetic approved CDN response */");
     }
+    if (host === "cdn.tailwindcss.com" && req.url === "/cors-foreign-frame") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      return res.end(`<!doctype html><body><script>
+        fetch("https://frame.claudemcpcontent.com/cors/foreign-frame", { cache: "no-store" })
+          .then(() => parent.postMessage({ kind: "cors-foreign-result", ok: true }, "https://gateway.audit.test"),
+            () => parent.postMessage({ kind: "cors-foreign-result", ok: false }, "https://gateway.audit.test"));
+      </script></body>`);
+    }
     if (host === "frame.claudemcpcontent.com" && req.url === "/downloads/synthetic-report.pdf") {
       const headers = {
         "content-type": "application/pdf",
@@ -335,6 +348,53 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
       downloadResponses.push({ path: req.url, method: req.method, contentType: headers["content-type"], disposition: headers["content-disposition"], contentLength: headers["content-length"], csp: headers["content-security-policy"], xFrameOptions: headers["x-frame-options"] });
       res.writeHead(200, headers);
       return res.end(CODE_FIXTURE);
+    }
+    if (host === "frame.claudemcpcontent.com" && req.url.startsWith("/cors/")) {
+      const corsHeaders = { "cache-control": "no-store", "access-control-allow-origin": "https://claude.ai" };
+      if (req.url === "/cors/html-export") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "text/html; charset=utf-8", "content-length": String(CORS_HTML_EXPORT.length) });
+        return res.end(CORS_HTML_EXPORT);
+      }
+      if (req.url === "/cors/positive" || req.url === "/cors/head") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "text/plain; charset=utf-8" });
+        return res.end("synthetic-cors-ok-001");
+      }
+      if (req.url === "/cors/large-binary") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "application/octet-stream", "content-length": String(CORS_LARGE_FIXTURE.length) });
+        return res.end(CORS_LARGE_FIXTURE);
+      }
+      if (req.url === "/cors/no-acao") {
+        res.writeHead(200, { "cache-control": "no-store", "content-type": "text/plain" });
+        return res.end("no-acao-body");
+      }
+      if (req.url === "/cors/wrong-acao") {
+        res.writeHead(200, { ...corsHeaders, "access-control-allow-origin": "https://wrong-origin.example", "content-type": "text/plain" });
+        return res.end("wrong-acao-body");
+      }
+      if (req.url === "/cors/duplicate-acao") {
+        res.writeHead(200, ["Cache-Control", "no-store", "Content-Type", "text/plain", "Access-Control-Allow-Origin", "https://claude.ai", "Access-Control-Allow-Origin", "https://wrong-origin.example"]);
+        return res.end("duplicate-acao");
+      }
+      if (req.url === "/cors/redirect") {
+        res.writeHead(302, { ...corsHeaders, location: "https://frame.claudemcpcontent.com/cors/redirect-target", "content-length": "0" });
+        return res.end();
+      }
+      if (req.url === "/cors/redirect-target") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "text/plain" });
+        return res.end("redirect-target");
+      }
+      if (req.url === "/cors/custom-port") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "text/plain" });
+        return res.end("custom-port-body");
+      }
+      if (req.url === "/cors/post") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "text/plain" });
+        return res.end("post-ok!");
+      }
+      if (req.url === "/cors/foreign-frame") {
+        res.writeHead(200, { ...corsHeaders, "content-type": "text/plain" });
+        return res.end("foreign-body");
+      }
     }
     if (host === "wrapper.claudeusercontent.com" && req.url === "/csp-wrapper") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
@@ -435,6 +495,13 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
         <a id="pdf-download" href="https://frame.claudemcpcontent.com/downloads/synthetic-report.pdf">Download PDF</a>
         <a id="code-download" href="https://frame.claudemcpcontent.com/downloads/synthetic-analysis.py">Download code</a>
       </body>`);
+    }
+    if (requestPath === "/cors-host") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      return res.end(`<!doctype html><title>synthetic CORS host</title><body><script>
+        window.corsProbeResults = [];
+        addEventListener("message", event => { if (event.origin === "https://cdn.tailwindcss.com" && event.data?.kind === "cors-foreign-result") corsProbeResults.push(event.data); });
+      </script><main>local synthetic CORS fixture</main></body>`);
     }
     if (req.url === "/unrelated-csp-frame") {
       events.push({ kind: "gateway-unrelated-frame", host: req.headers.host?.split(":")[0], path: req.url });
@@ -1075,6 +1142,127 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
         "the foreign root must be an allowed, proxy-routed CDN page rather than a blocked-host control");
       assert.equal(events.some(event => event.kind === "direct" && event.host === "frame.claudemcpcontent.com" && event.path === "/csp-artifact-unknown-parent"), false,
         "foreign-root child traffic must not reach the direct collector");
+    });
+
+    await t.test("artifact fetch CORS rewriting is origin-, method-, status-, and size-bounded", { timeout: 45000 }, async () => {
+      const page = await context.newPage();
+      const corsHostUrl = "https://gateway.audit.test/cors-host";
+      await page.goto(corsHostUrl);
+      const readiness = await waitForNativeGatewayTab(worker, corsHostUrl);
+      assert.equal(readiness.ready, true, "CORS probes start only after the exact gateway tab has native debugger interception");
+
+      const resultFor = async (path, options = {}) => page.evaluate(async ({ path, options }) => {
+        try {
+          const response = await fetch(`https://frame.claudemcpcontent.com${path}`, { cache: "no-store", ...options });
+          if (path === "/cors/large-binary") {
+            const bytes = await response.arrayBuffer();
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            return { resolved: true, status: response.status, bytes: bytes.byteLength,
+              sha256: [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("") };
+          }
+          return { resolved: true, status: response.status, body: await response.text() };
+        } catch (error) { return { resolved: false, errorName: error?.name || "Error" }; }
+      }, { path, options });
+      const tunnelRequests = path => events.filter(event => event.kind === "tunneled" && event.path === path);
+      const assertNoCredentialLeak = request => {
+        assert.equal(request.authorization, undefined, "gateway Basic credentials must never be sent to an artifact origin");
+        assert.equal(request.cookie, undefined, "gateway browser cookies must not be sent to an artifact origin");
+        assert.equal(request.hasProxyAuthorization, false, "proxy credentials must remain on the client-to-proxy connection");
+      };
+      const expectOrigin = (path, expected) => {
+        const requests = tunnelRequests(path);
+        assert.ok(requests.length > 0, `the synthetic tunnel collector must receive ${path}`);
+        assert.ok(requests.some(request => request.origin === expected), `request Origin for ${path} must be ${expected}`);
+        for (const request of requests) assertNoCredentialLeak(request);
+        assert.equal(events.some(event => event.kind === "direct" && event.path === path), false, `${path} must not bypass the authenticated proxy`);
+      };
+
+      const positive = await resultFor("/cors/positive");
+      assert.deepEqual(positive, { resolved: true, status: 200, body: "synthetic-cors-ok-001" },
+        "a matching upstream CORS response must become readable to the exact gateway page");
+      expectOrigin("/cors/positive", "https://claude.ai");
+      const positiveRepeat = await resultFor("/cors/positive");
+      assert.deepEqual(positiveRepeat, positive, "a second request to the same no-store artifact URL must remain compatible");
+      expectOrigin("/cors/positive", "https://claude.ai");
+
+      const nativeDownloadPromise = page.waitForEvent("download", { timeout: 12000 });
+      const blobPreparation = await page.evaluate(async () => {
+        const response = await fetch("https://frame.claudemcpcontent.com/cors/html-export", { cache: "no-store" });
+        if (!response.ok) return { fetched: false, status: response.status };
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "synthetic-cors-export.html";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        return { fetched: true, status: response.status, blobBytes: blob.size, blobType: blob.type };
+      });
+      assert.deepEqual(blobPreparation, { fetched: true, status: 200, blobBytes: CORS_HTML_EXPORT.length, blobType: "text/html" },
+        "the transformed response must become an HTML Blob before the browser download is triggered");
+      const nativeDownload = await nativeDownloadPromise;
+      assert.equal(nativeDownload.suggestedFilename(), "synthetic-cors-export.html", "the native download must preserve the synthetic HTML filename");
+      assert.equal(await nativeDownload.failure(), null, "the browser must complete the Blob download");
+      const nativeDownloadPath = await nativeDownload.path();
+      assert.ok(nativeDownloadPath, "the native download must be saved in the isolated Playwright context");
+      let nativeDownloadedBytes;
+      try {
+        fs.chmodSync(nativeDownloadPath, 0o600);
+        nativeDownloadedBytes = fs.readFileSync(nativeDownloadPath);
+      } finally { try { fs.unlinkSync(nativeDownloadPath); } catch {} }
+      assert.ok(nativeDownloadedBytes.equals(CORS_HTML_EXPORT), "fetch-to-Blob-to-download must preserve every HTML byte");
+      assert.equal(crypto.createHash("sha256").update(nativeDownloadedBytes).digest("hex"), CORS_HTML_EXPORT_SHA256,
+        "downloaded HTML bytes must match the expected synthetic fixture hash");
+      expectOrigin("/cors/html-export", "https://claude.ai");
+
+      const head = await resultFor("/cors/head", { method: "HEAD" });
+      assert.equal(head.resolved, true, "an approved HEAD response must pass the same narrow CORS path");
+      assert.equal(head.status, 200);
+      expectOrigin("/cors/head", "https://claude.ai");
+
+      const large = await resultFor("/cors/large-binary");
+      assert.deepEqual(large, { resolved: true, status: 200, bytes: CORS_LARGE_FIXTURE.length, sha256: CORS_LARGE_SHA256 },
+        "a binary response larger than the CSP rewrite cap must stream byte-for-byte with only its ACAO header changed");
+      expectOrigin("/cors/large-binary", "https://claude.ai");
+
+      for (const path of ["/cors/no-acao", "/cors/wrong-acao", "/cors/duplicate-acao", "/cors/redirect"]) {
+        const rejected = await resultFor(path);
+        assert.equal(rejected.resolved, false, `${path} must not receive a synthesized CORS permission`);
+        expectOrigin(path, "https://claude.ai");
+      }
+      assert.equal(tunnelRequests("/cors/redirect-target").length, 0, "redirect responses must not be followed under the CORS rewrite path");
+
+      const post = await resultFor("/cors/post", { method: "POST", headers: { "content-type": "text/plain" }, body: "synthetic-post" });
+      assert.equal(post.resolved, false, "non-GET/HEAD methods must remain outside the compatibility path");
+      expectOrigin("/cors/post", "https://gateway.audit.test");
+
+      const customPortUrl = `https://frame.claudemcpcontent.com:${tunnelPort}/cors/custom-port`;
+      const customPort = await page.evaluate(async url => {
+        try { const response = await fetch(url, { cache: "no-store" }); return { resolved: true, status: response.status, body: await response.text() }; }
+        catch (error) { return { resolved: false, errorName: error?.name || "Error" }; }
+      }, customPortUrl);
+      assert.equal(customPort.resolved, false, "non-default artifact ports must not be granted gateway CORS compatibility");
+      const customRequests = tunnelRequests("/cors/custom-port");
+      if (customRequests.length > 0) {
+        assert.ok(customRequests.every(request => request.origin === "https://gateway.audit.test"), "custom-port Origin must remain unchanged");
+      }
+      for (const request of customRequests) assertNoCredentialLeak(request);
+      assert.equal(events.some(event => event.kind === "direct" && event.path === "/cors/custom-port"), false);
+
+      await page.evaluate(() => {
+        const frame = document.createElement("iframe");
+        frame.id = "cors-foreign-frame";
+        frame.src = "https://cdn.tailwindcss.com/cors-foreign-frame";
+        document.body.appendChild(frame);
+      });
+      await page.waitForFunction(() => window.corsProbeResults?.some(result => result.kind === "cors-foreign-result"), null, { timeout: 10000 });
+      const foreignResult = await page.evaluate(() => window.corsProbeResults.find(result => result.kind === "cors-foreign-result"));
+      assert.deepEqual(foreignResult, { kind: "cors-foreign-result", ok: false }, "a foreign CDN frame must not inherit gateway CORS compatibility");
+      expectOrigin("/cors/foreign-frame", "https://cdn.tailwindcss.com");
+      assert.ok(proxyEvents.some(event => event.kind === "connect" && event.target === "frame.claudemcpcontent.com:443" && event.tokenMatches),
+        "CORS artifact requests must still use the authenticated mandatory TLS proxy");
     });
 
     await t.test("allowlisted artifact traffic traverses the authenticated TLS proxy", { timeout: 30000 }, async () => {
