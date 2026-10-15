@@ -114,19 +114,68 @@ function generateCertificate(dir) {
 async function waitForNativeGatewayTab(worker, targetUrl) {
   return worker.evaluate(async url => {
     const deadline = Date.now() + 8000;
-    let lastError = "tab_not_found";
+    let lastState = "tab_not_found";
     while (Date.now() < deadline) {
       const tab = (await chrome.tabs.query({})).find(candidate => candidate.url === url);
       if (tab) {
+        const commands = globalThis.__browserAuditFetchEnableCommands || [];
+        const fetchEnable = [...commands].reverse().find(command => command.tabId === tab.id);
+        if (fetchEnable?.outcome === "rejected") {
+          return { ready: false, tabId: tab.id, state: "fetch_enable_rejected" };
+        }
+        if (fetchEnable?.outcome !== "resolved") {
+          lastState = "fetch_enable_pending";
+          await new Promise(resolve => setTimeout(resolve, 25));
+          continue;
+        }
         try {
           const tree = await chrome.debugger.sendCommand({ tabId: tab.id }, "Page.getFrameTree");
-          return { ready: true, tabId: tab.id, rootFrameUrl: tree.frameTree?.frame?.url || "" };
-        } catch (error) { lastError = error?.message || "debugger_not_ready"; }
+          const rootFrameUrl = tree.frameTree?.frame?.url || "";
+          if (rootFrameUrl !== url) {
+            lastState = "root_frame_url_mismatch";
+            await new Promise(resolve => setTimeout(resolve, 25));
+            continue;
+          }
+          const current = await status();
+          if ((current.artifactDebugger?.attachedTabs || 0) < 1) {
+            lastState = "lifecycle_setup_pending";
+            await new Promise(resolve => setTimeout(resolve, 25));
+            continue;
+          }
+          return { ready: true, tabId: tab.id, rootFrameUrl,
+            fetchEnable: fetchEnable.outcome, attachedTabs: current.artifactDebugger?.attachedTabs || 0 };
+        } catch (_) { lastState = "frame_tree_unavailable_after_fetch_enable"; }
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 25));
     }
-    return { ready: false, lastError };
+    return { ready: false, state: lastState };
   }, targetUrl);
+}
+
+async function installPassiveFetchEnableObserver(worker) {
+  await worker.evaluate(() => {
+    if (globalThis.__browserAuditFetchEnableCommands) return;
+    globalThis.__browserAuditFetchEnableCommands = [];
+    const debuggerApi = chrome.debugger;
+    const sendCommand = debuggerApi.sendCommand;
+    debuggerApi.sendCommand = function (...args) {
+      const [debuggee, method] = args;
+      const observe = method === "Fetch.enable" && Number.isInteger(debuggee?.tabId) && !debuggee?.sessionId;
+      const result = sendCommand.apply(debuggerApi, args);
+      if (!observe) return result;
+      const record = { tabId: debuggee.tabId, outcome: "pending" };
+      const records = globalThis.__browserAuditFetchEnableCommands;
+      records.push(record);
+      if (records.length > 128) records.splice(0, records.length - 128);
+      return Promise.resolve(result).then(value => {
+        record.outcome = "resolved";
+        return value;
+      }, error => {
+        record.outcome = "rejected";
+        throw error;
+      });
+    };
+  });
 }
 
 async function installPassiveFetchObserver(worker) {
@@ -146,7 +195,8 @@ async function installPassiveFetchObserver(worker) {
       events.push({ tabId: source.tabId, url: params?.request?.url || "", resourceType: params?.resourceType || "",
         status: params?.responseStatusCode || 0, statusTextState: params?.responseStatusCode === undefined ? "request" : params?.responseStatusText === "" ? "empty" : typeof params?.responseStatusText === "string" ? "present" : "missing",
         frameId: params?.frameId || "",
-        hasAttachment: headers.some(header => header?.name?.toLowerCase() === "content-disposition" && /^attachment(?:\s*;|\s*$)/i.test(header?.value || "")) });
+        hasAttachment: headers.some(header => header?.name?.toLowerCase() === "content-disposition" && /^attachment(?:\s*;|\s*$)/i.test(header?.value || "")),
+        accessControlAllowOrigin: headers.find(header => header?.name?.toLowerCase() === "access-control-allow-origin")?.value || "" });
       const recorded = events[events.length - 1];
       recorded.contentType = headers.find(header => header?.name?.toLowerCase() === "content-type")?.value || "";
       recorded.contentDisposition = headers.find(header => header?.name?.toLowerCase() === "content-disposition")?.value || "";
@@ -630,6 +680,7 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
       ],
     });
     const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker", { timeout: 15000 });
+    await installPassiveFetchEnableObserver(worker);
     const unconfigured = await context.newPage();
     await unconfigured.goto("https://unknown.claudeusercontent.com/startup-block-probe", { timeout: 5000 }).catch(() => {});
     await unconfigured.waitForTimeout(300);
@@ -1210,7 +1261,14 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
 
       const positive = await resultFor("/cors/positive");
       assert.deepEqual(positive, { resolved: true, status: 200, body: "synthetic-cors-ok-001" },
-        "a matching upstream CORS response must become readable to the exact gateway page");
+        `a matching upstream CORS response must become readable to the exact gateway page (${JSON.stringify({
+          readiness,
+          collector: tunnelRequests("/cors/positive").map(({ method, origin, host, path }) => ({ method, origin, host, path })),
+          passiveFetch: (await getPassiveFetchEvents(worker)).filter(event => event.tabId === readiness.tabId
+            && event.url === "https://frame.claudemcpcontent.com/cors/positive").map(({ resourceType, status, statusTextState, accessControlAllowOrigin }) => ({
+              resourceType, status, statusTextState, accessControlAllowOrigin,
+            })),
+        })})`);
       expectOrigin("/cors/positive", "https://claude.ai");
       const positiveRepeat = await resultFor("/cors/positive");
       assert.deepEqual(positiveRepeat, positive, "a second request to the same no-store artifact URL must remain compatible");
