@@ -183,7 +183,7 @@ async function secureWebRTC() {
   }
 }
 async function releaseFirefoxPrivacy() {
-  // Builds before 2.0.6 forced proxy-only WebRTC for the whole browser.
+  // Builds before 2.0.7 forced proxy-only WebRTC for the whole browser.
   for (const setting of [extensionAPI.privacy?.network?.webRTCIPHandlingPolicy, extensionAPI.privacy?.network?.networkPredictionEnabled]) {
     try { if ((await setting?.get({}))?.levelOfControl === "controlled_by_this_extension") await setting.clear({}); }
     catch (_) { /* Not controlled by this extension. */ }

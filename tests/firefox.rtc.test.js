@@ -39,7 +39,7 @@ test("Firefox product leaves WebRTC of other sites working and releases the earl
   const optionsUrl = await executeChromeScript(harness, `return WebExtensionPolicy.getByID(${JSON.stringify(addonId)}).extension.getURL("options.html");`);
   await harness.client.command("WebDriver:SetTimeouts", { script: 12000 });
 
-  // Builds before 2.0.6 forced proxy_only for the whole browser; reproduce that state.
+  // Builds before 2.0.7 forced proxy_only for the whole browser; reproduce that state.
   await harness.client.command("WebDriver:Navigate", { url: optionsUrl });
   const legacy = await extensionScript(harness, `
     await browser.privacy.network.webRTCIPHandlingPolicy.set({ value: "proxy_only" });

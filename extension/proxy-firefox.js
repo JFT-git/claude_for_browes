@@ -76,7 +76,7 @@
       } catch (_) { available = false; reason = "firefox_proxy_api_unavailable"; }
     }
     async function releaseLegacySetting() {
-      // Builds before 2.0.6 installed a browser-wide dead-end proxy. Clearing
+      // Builds before 2.0.7 installed a browser-wide dead-end proxy. Clearing
       // needs no private-window access and restores the user's own settings.
       try {
         if ((await setting?.get({}))?.levelOfControl === "controlled_by_this_extension") await setting.clear({});

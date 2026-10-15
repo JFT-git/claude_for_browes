@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gateway Connector for Claude",
-  "version": "2.0.6",
+  "version": "2.0.7",
   "description": "Routes claude.ai through your gateway. Enter your gateway host once \u2014 one build for all domains.",
   "permissions": [
     "declarativeNetRequest",
