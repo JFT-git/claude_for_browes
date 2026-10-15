@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Bounded TLS-only SNI front door. Never terminates or logs client traffic."""
+import errno
 import ipaddress
 import json
 import os
-import select
+import selectors
 import socket
 import threading
 import time
@@ -12,7 +13,13 @@ MAX_HELLO_BYTES = 65536
 HELLO_TIMEOUT = 10.0
 CONNECT_TIMEOUT = 5.0
 IDLE_TIMEOUT = 60.0
-MAX_CONNECTIONS = 256
+# Cloudflare opens one origin connection per concurrent request and keeps it
+# alive, so a single Claude page load (hundreds of parallel modules) needs
+# hundreds of slots; 256 overflowed and every rejection surfaced as a 525.
+MAX_CONNECTIONS = 1024
+# A connection that arrives while every slot is busy waits briefly for one to
+# free instead of being closed at once.
+CAPACITY_WAIT = 5.0
 BUFFER_SIZE = 65536
 CADDY = ("caddy", 443)
 GATEWAY = ("gateway", 8443)
@@ -217,45 +224,62 @@ def pipe(client, upstream, idle_timeout=IDLE_TIMEOUT, diagnostics=None):
     for sock in sockets:
         sock.setblocking(False)
     last_activity = time.monotonic()
-    while True:
-        for src, dst in ((client, upstream), (upstream, client)):
-            if src not in reading and not pending[dst] and dst not in shut:
-                dst.shutdown(socket.SHUT_WR)
-                shut.add(dst)
-        if not reading and not any(pending.values()):
-            return
-        remaining = idle_timeout - (time.monotonic() - last_activity)
-        if remaining <= 0:
-            if diagnostics is not None:
-                diagnostics.record("relay_idle_timeout")
-            return
-        readers = [s for s in reading if len(pending[upstream if s is client else client]) < BUFFER_SIZE]
-        writers = [s for s in sockets if pending[s]]
-        ready_read, ready_write, _ = select.select(readers, writers, [], remaining)
-        if not ready_read and not ready_write:
-            if diagnostics is not None:
-                diagnostics.record("relay_idle_timeout")
-            return
-        for src in ready_read:
-            dst = upstream if src is client else client
-            try:
-                data = src.recv(min(16384, BUFFER_SIZE - len(pending[dst])))
-            except BlockingIOError:
-                continue
-            if data:
-                pending[dst].extend(data)
-                last_activity = time.monotonic()
-            else:
-                reading.remove(src)
-        for dst in ready_write:
-            try:
-                count = dst.send(pending[dst])
-            except BlockingIOError:
-                continue
-            if count <= 0:
+    # poll() has no FD_SETSIZE ceiling (select() fails above FD 1023) and,
+    # unlike epoll, needs no extra descriptor per relay.
+    with getattr(selectors, "PollSelector", selectors.DefaultSelector)() as selector:
+        interest = {}
+        while True:
+            for src, dst in ((client, upstream), (upstream, client)):
+                if src not in reading and not pending[dst] and dst not in shut:
+                    dst.shutdown(socket.SHUT_WR)
+                    shut.add(dst)
+            if not reading and not any(pending.values()):
                 return
-            del pending[dst][:count]
-            last_activity = time.monotonic()
+            remaining = idle_timeout - (time.monotonic() - last_activity)
+            if remaining <= 0:
+                if diagnostics is not None:
+                    diagnostics.record("relay_idle_timeout")
+                return
+            for sock in sockets:
+                other = upstream if sock is client else client
+                events = (selectors.EVENT_READ if sock in reading and len(pending[other]) < BUFFER_SIZE else 0) \
+                    | (selectors.EVENT_WRITE if pending[sock] else 0)
+                current = interest.get(sock, 0)
+                if events != current:
+                    if not current:
+                        selector.register(sock, events)
+                    elif not events:
+                        selector.unregister(sock)
+                    else:
+                        selector.modify(sock, events)
+                    interest[sock] = events
+            ready = selector.select(remaining)
+            if not ready:
+                if diagnostics is not None:
+                    diagnostics.record("relay_idle_timeout")
+                return
+            ready_read = [key.fileobj for key, mask in ready if mask & selectors.EVENT_READ]
+            ready_write = [key.fileobj for key, mask in ready if mask & selectors.EVENT_WRITE]
+            for src in ready_read:
+                dst = upstream if src is client else client
+                try:
+                    data = src.recv(min(16384, BUFFER_SIZE - len(pending[dst])))
+                except BlockingIOError:
+                    continue
+                if data:
+                    pending[dst].extend(data)
+                    last_activity = time.monotonic()
+                else:
+                    reading.remove(src)
+            for dst in ready_write:
+                try:
+                    count = dst.send(pending[dst])
+                except BlockingIOError:
+                    continue
+                if count <= 0:
+                    return
+                del pending[dst][:count]
+                last_activity = time.monotonic()
 
 
 def handle(client, public_host, connect_host, diagnostics=None):
@@ -285,7 +309,20 @@ def handle(client, public_host, connect_host, diagnostics=None):
                 sock.close()
 
 
+def raise_open_file_limit():
+    """Two sockets per connection must fit the soft limit (Docker's is 1024)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        needed = 2 * MAX_CONNECTIONS + 64
+        if soft != resource.RLIM_INFINITY and soft < needed:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (needed if hard == resource.RLIM_INFINITY else min(needed, hard), hard))
+    except (ImportError, ValueError, OSError):
+        pass  # accept() then fails at the kernel limit and the loop continues.
+
+
 def main():
+    raise_open_file_limit()
     public_host = os.environ["PUBLIC_HOST"].lower()
     connect_host = str(ipaddress.ip_address(os.environ["CONNECT_HOST"]))
     if not public_host or public_host == connect_host:
@@ -308,8 +345,15 @@ def main():
         server.bind(("0.0.0.0", 443))
         server.listen(MAX_CONNECTIONS)
         while True:
-            client, _ = server.accept()
-            if not slots.acquire(blocking=False):
+            try:
+                client, _ = server.accept()
+            except OSError as exc:
+                if exc.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM):
+                    time.sleep(0.1)  # Out of descriptors: let relays release some.
+                    continue
+                raise
+            # Other arrivals queue in the listen backlog meanwhile.
+            if not slots.acquire(timeout=CAPACITY_WAIT):
                 if diagnostics is not None:
                     diagnostics.record("capacity_rejected")
                 client.close()

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -277,13 +278,23 @@ class CaddyAuthTests(unittest.TestCase):
 
 class FrontdoorLoadTests(unittest.TestCase):
     def test_cold_asset_burst_capacity_rejection_and_recovery(self):
-        self.assertEqual(mux.MAX_CONNECTIONS, 256)
+        self.assertEqual(mux.MAX_CONNECTIONS, 1024)
+        # This process owns both peers of every relayed connection.
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        needed = 3 * mux.MAX_CONNECTIONS + 256
+        if soft != resource.RLIM_INFINITY and soft < needed:
+            limit = needed if hard == resource.RLIM_INFINITY else min(needed, hard)
+            if limit < needed:
+                self.skipTest("open-file limit is too low for the capacity fixture")
+            resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
         hello = client_hello()
         forwarded, errors, upstreams, clients = [], [], [], []
         lock, stop = threading.Lock(), threading.Event()
         backend = socket.socket()
         backend.bind(("127.0.0.1", 0))
-        backend.listen(512)
+        backend.listen(2048)
         backend.settimeout(0.1)
 
         def accept_upstreams():
@@ -331,6 +342,7 @@ class FrontdoorLoadTests(unittest.TestCase):
                     mux = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(mux)
                     mux.CADDY = ("127.0.0.1", int(sys.argv[2]))
+                    mux.CAPACITY_WAIT = 1.0
                     native_socket, native_diagnostics = socket.socket, mux.Diagnostics
                     ready, reports = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
                     class FixtureSocket(native_socket):
@@ -378,21 +390,31 @@ class FrontdoorLoadTests(unittest.TestCase):
                     client.sendall(hello)
 
                 wait_for(ready.exists, "mux fixture did not bind")
-                for _ in range(192):
+                # A Claude page load through Cloudflare opens hundreds of origin
+                # connections at once; all of them must be forwarded.
+                for _ in range(600):
                     open_client()
-                wait_for(lambda: len(forwarded) >= 192, "cold asset burst was not forwarded")
-                for _ in range(mux.MAX_CONNECTIONS - 192):
+                wait_for(lambda: len(forwarded) >= 600, "cold asset burst was not forwarded")
+                for _ in range(mux.MAX_CONNECTIONS - 600):
                     open_client()
                 wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS, "bounded capacity was not reached")
                 wait_for(lambda: any(entry["active"] == mux.MAX_CONNECTIONS for entry in reports()), "capacity peak not reported")
                 proc_fds = Path(f"/proc/{process.pid}/fd")
                 if proc_fds.exists():
                     self.assertLessEqual(len(list(proc_fds.iterdir())), 2 * mux.MAX_CONNECTIONS + 8)
-                for _ in range(8):
+                for _ in range(3):
                     with socket.create_connection(("127.0.0.1", int(ready.read_text())), timeout=3) as excess:
                         self.assertEqual(excess.recv(1), b"")
-                wait_for(lambda: sum(entry["capacity_rejected"] for entry in reports()) == 8, "over-capacity drops not reported")
+                wait_for(lambda: sum(entry["capacity_rejected"] for entry in reports()) == 3, "over-capacity drops not reported")
                 self.assertEqual(len(forwarded), mux.MAX_CONNECTIONS)
+                # An arrival at full capacity waits for a freed slot instead of being dropped.
+                open_client()
+                # A reset ends that relay at once; its slot then admits the waiter.
+                freed = clients.pop(0)
+                freed.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                freed.close()
+                wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS + 1, "waiting arrival was not forwarded")
+                self.assertEqual(sum(entry["capacity_rejected"] for entry in reports()), 3)
                 # Free all occupied slots, then verify the listener recovers.
                 with lock:
                     occupied = clients + upstreams[:]
@@ -406,7 +428,7 @@ class FrontdoorLoadTests(unittest.TestCase):
                 wait_for(lambda: bool(reports()) and reports()[-1]["active"] == 0, "closed slots were not released")
                 for _ in range(16):
                     open_client()
-                wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS + 16, "listener did not recover after saturation")
+                wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS + 17, "listener did not recover after saturation")
                 self.assertFalse(errors)
                 self.assertLessEqual(max(entry["active_peak"] for entry in reports()), mux.MAX_CONNECTIONS)
         finally:
@@ -520,7 +542,8 @@ class DiagnosticsTests(unittest.TestCase):
         listener.__enter__.return_value = listener
         listener.accept.side_effect = [(first, None), (excess, None), OSError("stop fixture")]
         with patch.dict(os.environ, {"PUBLIC_HOST": PUBLIC_HOST, "CONNECT_HOST": CONNECT_HOST, "FRONTDOOR_DIAGNOSTICS": "1"}), \
-                patch.object(mux, "MAX_CONNECTIONS", 1), patch.object(mux, "Diagnostics", return_value=diagnostics), \
+                patch.object(mux, "MAX_CONNECTIONS", 1), patch.object(mux, "CAPACITY_WAIT", 0), \
+                patch.object(mux, "Diagnostics", return_value=diagnostics), \
                 patch.object(mux.socket, "socket", return_value=listener), patch.object(mux.threading, "Thread"), \
                 patch.object(mux.socket, "create_connection") as upstream:
             # Workers do not start, keeping the one permitted slot occupied.
