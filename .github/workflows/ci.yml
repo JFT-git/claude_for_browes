@@ -85,9 +85,26 @@ jobs:
           sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
           npm run test:firefox
 
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      unpublished: ${{ steps.check.outputs.unpublished }}
+    steps:
+      - uses: actions/checkout@v4
+      # Pushes that do not raise the manifest version (docs, CI) skip the release.
+      - id: check
+        run: |
+          set -eu
+          V=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' extension/manifest.chrome.json | head -1)
+          if [ -z "$(git ls-remote --tags origin "refs/tags/v$V" "refs/tags/v$V^{}")" ]; then
+            echo "unpublished=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$V is already released; nothing to publish."
+          fi
+
   release:
-    needs: [test, build-addons, browser, firefox]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test, build-addons, browser, firefox, version]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.version.outputs.unpublished == 'true'
     concurrency:
       group: signed-extension-release
       cancel-in-progress: false
