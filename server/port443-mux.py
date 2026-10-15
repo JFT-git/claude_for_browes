@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded TLS-only SNI front door. Never terminates or logs client traffic."""
 import ipaddress
+import json
 import os
 import select
 import socket
@@ -15,6 +16,61 @@ MAX_CONNECTIONS = 128
 BUFFER_SIZE = 65536
 CADDY = ("caddy", 443)
 GATEWAY = ("gateway", 8443)
+DIAGNOSTIC_CATEGORIES = (
+    "accepted", "capacity_rejected", "hello_rejected", "hello_timeout",
+    "upstream_connect_error", "upstream_write_error", "relay_error",
+    "relay_idle_timeout", "connection_closed", "worker_start_error",
+)
+ERROR_CATEGORIES = {"hello": "hello_rejected", "connect": "upstream_connect_error",
+                    "write": "upstream_write_error", "relay": "relay_error"}
+
+
+class Diagnostics:
+    """Fixed-size interval counters, containing no traffic or client identity."""
+    def __init__(self, output=None):
+        self._lock = threading.Lock()
+        self._counts = dict.fromkeys(DIAGNOSTIC_CATEGORIES, 0)
+        self._active = self._peak = 0
+        self._changed = False
+        self._output = output or (lambda line: print(line, flush=True))
+
+    def record(self, category):
+        with self._lock:
+            if category not in self._counts:
+                raise ValueError("invalid diagnostic category")
+            self._counts[category] += 1
+            self._changed = True
+
+    def accepted(self):
+        with self._lock:
+            self._counts["accepted"] += 1
+            self._active += 1
+            self._peak = max(self._peak, self._active)
+            self._changed = True
+
+    def closed(self):
+        with self._lock:
+            self._counts["connection_closed"] += 1
+            self._active = max(0, self._active - 1)
+            self._changed = True
+
+    def emit(self):
+        with self._lock:
+            if not self._changed:
+                return
+            snapshot = {"event": "frontdoor_diagnostics", **self._counts,
+                        "active": self._active, "active_peak": self._peak}
+            self._counts = dict.fromkeys(DIAGNOSTIC_CATEGORIES, 0)
+            self._peak = self._active
+            self._changed = False
+        try:
+            self._output(json.dumps(snapshot, separators=(",", ":")))
+        except OSError:
+            pass  # A log sink failure must not affect forwarding.
+
+    def report_forever(self, stop, interval=30.0):
+        while not stop.wait(interval):
+            self.emit()
 
 
 class RejectedHello(ValueError):
@@ -152,7 +208,7 @@ def proxy_header(client):
     return (f"PROXY TCP{source.version} {source} {destination} {peer[1]} {local[1]}\r\n").encode("ascii")
 
 
-def pipe(client, upstream, idle_timeout=IDLE_TIMEOUT):
+def pipe(client, upstream, idle_timeout=IDLE_TIMEOUT, diagnostics=None):
     """Relay with bounded per-direction buffers, half-closes and an idle timeout."""
     sockets = (client, upstream)
     pending = {client: bytearray(), upstream: bytearray()}
@@ -170,11 +226,15 @@ def pipe(client, upstream, idle_timeout=IDLE_TIMEOUT):
             return
         remaining = idle_timeout - (time.monotonic() - last_activity)
         if remaining <= 0:
+            if diagnostics is not None:
+                diagnostics.record("relay_idle_timeout")
             return
         readers = [s for s in reading if len(pending[upstream if s is client else client]) < BUFFER_SIZE]
         writers = [s for s in sockets if pending[s]]
         ready_read, ready_write, _ = select.select(readers, writers, [], remaining)
         if not ready_read and not ready_write:
+            if diagnostics is not None:
+                diagnostics.record("relay_idle_timeout")
             return
         for src in ready_read:
             dst = upstream if src is client else client
@@ -198,19 +258,27 @@ def pipe(client, upstream, idle_timeout=IDLE_TIMEOUT):
             last_activity = time.monotonic()
 
 
-def handle(client, public_host, connect_host):
+def handle(client, public_host, connect_host, diagnostics=None):
     upstream = None
+    stage = "hello"
     try:
         hello, hostname = read_client_hello(client)
         target = choose_upstream(hostname, public_host, connect_host)
+        stage = "connect"
         upstream = socket.create_connection(target, CONNECT_TIMEOUT)
+        stage = "write"
         if target == CADDY:
             upstream.sendall(proxy_header(client))
         upstream.sendall(hello)
-        pipe(client, upstream)
+        stage = "relay"
+        pipe(client, upstream, diagnostics=diagnostics)
+    except TimeoutError:
+        if diagnostics is not None:
+            diagnostics.record("hello_timeout" if stage == "hello" else ERROR_CATEGORIES[stage])
     except (OSError, ValueError):
         # Do not log client traffic, SNI, URLs, or tunnel credentials.
-        pass
+        if diagnostics is not None:
+            diagnostics.record(ERROR_CATEGORIES[stage])
     finally:
         for sock in (client, upstream):
             if sock is not None:
@@ -223,11 +291,16 @@ def main():
     if not public_host or public_host == connect_host:
         raise ValueError("PUBLIC_HOST must be the gateway DNS name")
     slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+    diagnostics = Diagnostics() if os.environ.get("FRONTDOOR_DIAGNOSTICS") == "1" else None
+    if diagnostics is not None:
+        threading.Thread(target=diagnostics.report_forever, args=(threading.Event(),), daemon=True).start()
 
     def worker(client):
         try:
-            handle(client, public_host, connect_host)
+            handle(client, public_host, connect_host, diagnostics=diagnostics)
         finally:
+            if diagnostics is not None:
+                diagnostics.closed()
             slots.release()
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -237,11 +310,18 @@ def main():
         while True:
             client, _ = server.accept()
             if not slots.acquire(blocking=False):
+                if diagnostics is not None:
+                    diagnostics.record("capacity_rejected")
                 client.close()
                 continue
+            if diagnostics is not None:
+                diagnostics.accepted()
             try:
                 threading.Thread(target=worker, args=(client,), daemon=True).start()
             except RuntimeError:
+                if diagnostics is not None:
+                    diagnostics.record("worker_start_error")
+                    diagnostics.closed()
                 slots.release()
                 client.close()
 

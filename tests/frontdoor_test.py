@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("frontdoor", Path(__file__).resolve().parents[1] / "server/port443-mux.py")
 mux = importlib.util.module_from_spec(SPEC)
@@ -271,6 +271,144 @@ class CaddyAuthTests(unittest.TestCase):
             backend.shutdown()
             backend.server_close()
             backend_thread.join(timeout=1)
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_interval_reset_preserves_active_count_and_rejects_dynamic_keys(self):
+        output = []
+        diagnostics = mux.Diagnostics(output.append)
+        diagnostics.accepted()
+        diagnostics.accepted()
+        diagnostics.closed()
+        diagnostics.record("capacity_rejected")
+        self.assertFalse(output)  # No per-request output.
+        with self.assertRaises(ValueError):
+            diagnostics.record("PRIVATE_CLIENT_IDENTITY")
+        diagnostics.emit()
+        first = json.loads(output[0])
+        self.assertEqual((first["accepted"], first["active"], first["active_peak"]), (2, 1, 2))
+        self.assertEqual(first["capacity_rejected"], 1)
+        self.assertEqual(set(first), set(mux.DIAGNOSTIC_CATEGORIES) | {"event", "active", "active_peak"})
+        diagnostics.emit()
+        self.assertEqual(len(output), 1)
+        diagnostics.closed()
+        diagnostics.emit()
+        second = json.loads(output[1])
+        self.assertEqual((second["accepted"], second["active"], second["active_peak"]), (0, 0, 1))
+        self.assertNotIn("PRIVATE_CLIENT_IDENTITY", "".join(output))
+
+    def test_blocked_output_does_not_lock_connection_accounting(self):
+        entered, release, counted = threading.Event(), threading.Event(), threading.Event()
+
+        def output(_line):
+            entered.set()
+            release.wait(1)
+
+        diagnostics = mux.Diagnostics(output)
+        diagnostics.accepted()
+        emitter = threading.Thread(target=diagnostics.emit)
+        emitter.start()
+        counter = None
+        try:
+            self.assertTrue(entered.wait(1))
+            def count():
+                diagnostics.accepted()
+                diagnostics.record("capacity_rejected")
+                diagnostics.closed()
+                counted.set()
+            counter = threading.Thread(target=count)
+            counter.start()
+            self.assertTrue(counted.wait(0.3))
+        finally:
+            release.set()
+            emitter.join(timeout=1)
+            if counter is not None:
+                counter.join(timeout=1)
+
+    def test_concurrent_events_and_periodic_report_are_bounded(self):
+        output = []
+        diagnostics = mux.Diagnostics(output.append)
+        def count():
+            for _ in range(100):
+                diagnostics.record("capacity_rejected")
+        workers = [threading.Thread(target=count) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=1)
+        stop = Mock()
+        stop.wait.side_effect = [False, False, True]
+        diagnostics.report_forever(stop)
+        self.assertEqual([call.args for call in stop.wait.call_args_list], [(30.0,)] * 3)
+        self.assertEqual(len(output), 1)  # Second unchanged interval is silent.
+        self.assertEqual(json.loads(output[0])["capacity_rejected"], 800)
+
+    def test_handler_reports_only_fixed_failure_stage(self):
+        cases = (("hello", mux.RejectedHello, "hello_rejected"),
+                 ("hello", TimeoutError, "hello_timeout"),
+                 ("connect", OSError, "upstream_connect_error"),
+                 ("write", OSError, "upstream_write_error"),
+                 ("relay", OSError, "relay_error"))
+        for stage, error, expected in cases:
+            with self.subTest(stage=stage, expected=expected):
+                output = []
+                diagnostics = mux.Diagnostics(output.append)
+                client, upstream = Mock(), Mock()
+                with patch.object(mux, "read_client_hello", return_value=(b"TLS", PUBLIC_HOST)) as hello, \
+                        patch.object(mux.socket, "create_connection", return_value=upstream) as connect, \
+                        patch.object(mux, "proxy_header", return_value=b"PROXY"), patch.object(mux, "pipe") as relay:
+                    {"hello": hello, "connect": connect, "write": upstream.sendall, "relay": relay}[stage].side_effect = error("PRIVATE_EXCEPTION_PAYLOAD")
+                    mux.handle(client, PUBLIC_HOST, CONNECT_HOST, diagnostics=diagnostics)
+                diagnostics.emit()
+                report = json.loads(output[0])
+                self.assertEqual(report[expected], 1)
+                self.assertEqual(sum(report[key] for key in mux.DIAGNOSTIC_CATEGORIES), 1)
+                self.assertNotIn("PRIVATE_EXCEPTION_PAYLOAD", output[0])
+                client.close.assert_called_once()
+
+    def test_capacity_rejections_are_counted_without_opening_an_upstream(self):
+        output = []
+        diagnostics = mux.Diagnostics(output.append)
+        listener, first, excess = MagicMock(), Mock(), Mock()
+        listener.__enter__.return_value = listener
+        listener.accept.side_effect = [(first, None), (excess, None), OSError("stop fixture")]
+        with patch.dict(os.environ, {"PUBLIC_HOST": PUBLIC_HOST, "CONNECT_HOST": CONNECT_HOST, "FRONTDOOR_DIAGNOSTICS": "1"}), \
+                patch.object(mux, "MAX_CONNECTIONS", 1), patch.object(mux, "Diagnostics", return_value=diagnostics), \
+                patch.object(mux.socket, "socket", return_value=listener), patch.object(mux.threading, "Thread"), \
+                patch.object(mux.socket, "create_connection") as upstream:
+            # Workers do not start, keeping the one permitted slot occupied.
+            with self.assertRaises(OSError):
+                mux.main()
+        diagnostics.emit()
+        report = json.loads(output[0])
+        self.assertEqual((report["accepted"], report["capacity_rejected"], report["active_peak"]), (1, 1, 1))
+        excess.close.assert_called_once()
+        upstream.assert_not_called()
+
+    def test_idle_relay_counter_does_not_include_socket_identity(self):
+        output = []
+        diagnostics = mux.Diagnostics(output.append)
+        a, b = socket.socketpair()
+        c, d = socket.socketpair()
+        try:
+            mux.pipe(b, c, idle_timeout=0.01, diagnostics=diagnostics)
+            diagnostics.emit()
+            self.assertEqual(json.loads(output[0])["relay_idle_timeout"], 1)
+        finally:
+            for sock in (a, b, c, d):
+                sock.close()
+
+    def test_diagnostics_are_disabled_without_explicit_opt_in(self):
+        listener = MagicMock()
+        listener.__enter__.return_value = listener
+        listener.accept.side_effect = OSError("stop fixture")
+        with patch.dict(os.environ, {"PUBLIC_HOST": PUBLIC_HOST, "CONNECT_HOST": CONNECT_HOST, "FRONTDOOR_DIAGNOSTICS": "0"}), \
+                patch.object(mux.socket, "socket", return_value=listener), patch.object(mux, "Diagnostics") as diagnostics, \
+                patch.object(mux.threading, "Thread") as thread:
+            with self.assertRaises(OSError):
+                mux.main()
+        diagnostics.assert_not_called()
+        thread.assert_not_called()
 
 
 class FrontdoorTests(unittest.TestCase):

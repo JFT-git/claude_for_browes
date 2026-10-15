@@ -6,6 +6,8 @@ services:
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST to the gateway domain}
       CONNECT_HOST: ${CONNECT_HOST:?set CONNECT_HOST to the public IP}
+      # Optional fixed-category interval counters; never includes client data.
+      FRONTDOOR_DIAGNOSTICS: ${FRONTDOOR_DIAGNOSTICS:-0}
     ports:
       - "443:443"
     volumes:
