@@ -1,4 +1,33 @@
 services:
+  frontdoor:
+    image: python:3.13-alpine
+    restart: unless-stopped
+    command: ["python", "/app/port443-mux.py"]
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST to the gateway domain}
+      CONNECT_HOST: ${CONNECT_HOST:?set CONNECT_HOST to the public IP}
+      # Optional fixed-category interval counters; never includes client data.
+      FRONTDOOR_DIAGNOSTICS: ${FRONTDOOR_DIAGNOSTICS:-0}
+    ports:
+      - "443:443"
+    volumes:
+      - ./port443-mux.py:/app/port443-mux.py:ro
+    networks:
+      transport:
+        ipv4_address: ${FRONTDOOR_IP:-172.30.240.2}
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 320
+    depends_on:
+      caddy:
+        condition: service_started
+      gateway:
+        condition: service_started
+
   gateway:
     image: node:22-alpine
     restart: unless-stopped
@@ -7,59 +36,80 @@ services:
     environment:
       PORT: "8088"
       LISTEN: "0.0.0.0"
-      # directory holding one cookie file per user: <user>.json
       COOKIES_DIR: /cookies
-      # set your public gateway domain (configure.sh fills this)
-      PUBLIC_HOST: ${PUBLIC_HOST:-claude.example.com}
-      # values come from .env next to this file (created by install.sh)
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST to the gateway domain}
       COOKIES_KEY: ${COOKIES_KEY:-}
       ADMIN_USERS: ${ADMIN_USERS:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      # CONNECT tunnel for artifact hosts. Advertise the server's public ip:port
-      # (not the Cloudflare hostname — Cloudflare does not forward CONNECT).
-      CONNECT_PORT: "8089"
-      CONNECT_ADVERTISE: ${CONNECT_ADVERTISE:-}
+      # HTTPS CONNECT reaches the origin IP directly; TLS authenticates that IP.
+      CONNECT_HOST: ${CONNECT_HOST:?set CONNECT_HOST to the public IP}
+      CONNECT_PORT: "8443"
+      CONNECT_ADVERTISE: https://${CONNECT_HOST}:443
+      CONNECT_TLS_CERT: /connect-cert/${CONNECT_HOST}.crt
+      CONNECT_TLS_KEY: /connect-cert/${CONNECT_HOST}.key
     volumes:
       - ./gateway/src:/app:ro
-      # writable: the gateway stores each user's session cookies here
       - ./gateway/cookies:/cookies
-      # ready-made browser extension packages served at /__ext/ (behind basic_auth)
       - ./extension:/ext:ro
-    # CONNECT proxy for artifact hosts. Plain HTTP to the server IP; the browser's
-    # TLS to claudeusercontent.com is tunneled inside it, so the payload stays encrypted.
-    ports:
-      - "127.0.0.1:8888:8089"
-    # hardening: no extra privileges, read-only root fs
+      # Expose only the IP certificate, never other sites' TLS private keys.
+      # Caddy's HTTP-01 healthcheck provisions this directory before gateway starts.
+      - type: volume
+        source: caddy-data
+        target: /connect-cert
+        read_only: true
+        volume:
+          nocopy: true
+          subpath: caddy/certificates/acme-v02.api.letsencrypt.org-directory/${CONNECT_HOST}
+    networks: [transport]
     read_only: true
     tmpfs:
       - /tmp
-    cap_drop:
-      - ALL
+    cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
     mem_limit: 256m
     pids_limit: 128
+    depends_on:
+      caddy:
+        condition: service_healthy
 
   caddy:
-    image: caddy:2
+    image: caddy:2.11.7
     restart: unless-stopped
+    environment:
+      CONNECT_HOST: ${CONNECT_HOST:?set CONNECT_HOST to the public IP}
+      FRONTDOOR_IP: ${FRONTDOOR_IP:-172.30.240.2}
     ports:
-      - 80:80
-      - 443:443
+      - "80:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./privacy.html:/srv/privacy/index.html:ro
       - caddy-data:/data
       - caddy-config:/config
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
+    networks: [transport]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
     security_opt:
       - no-new-privileges:true
-    depends_on:
-      - gateway
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'test -s "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$$CONNECT_HOST/$$CONNECT_HOST.crt" && test -s "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$$CONNECT_HOST/$$CONNECT_HOST.key"'
+      interval: 10s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+
+networks:
+  transport:
+    ipam:
+      config:
+        - subnet: ${FRONTDOOR_SUBNET:-172.30.240.0/24}
+          # Keep dynamic Caddy/gateway addresses away from frontdoor's static IP.
+          # Custom subnet/range overrides must contain the static FRONTDOOR_IP
+          # in the subnet, but outside this dynamic allocation range.
+          ip_range: ${TRANSPORT_IP_RANGE:-172.30.240.128/25}
 
 volumes:
   caddy-data: null

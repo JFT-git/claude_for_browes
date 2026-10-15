@@ -25,9 +25,12 @@
 const http = require("http");
 const https = require("https");
 const net = require("net");
+const tls = require("tls");
+const dns = require("dns").promises;
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const zlib = require("zlib");
 
 function parseKey(v) {
   if (!v) return null;
@@ -58,12 +61,21 @@ const cfg = {
   // optional Telegram alerts
   tgToken: process.env.TELEGRAM_BOT_TOKEN || "",
   tgChat: process.env.TELEGRAM_CHAT_ID || "",
-  // CONNECT proxy (artifact hosts only). Advertised to the extension as ip:port.
+  // CONNECT is TLS-only. A protected session endpoint mints independent short-lived credentials.
   connectPort: parseInt(process.env.CONNECT_PORT || "0", 10),
   connectAdvertise: process.env.CONNECT_ADVERTISE || "",
-  connectAuthHost: process.env.CONNECT_AUTH_HOST || "caddy",
-  connectAuthPort: parseInt(process.env.CONNECT_AUTH_PORT || "443", 10),
+  connectTlsCert: process.env.CONNECT_TLS_CERT || "",
+  connectTlsKey: process.env.CONNECT_TLS_KEY || "",
+  proxySessionTtlMs: 15 * 60 * 1000,
+  proxySessionsPerUser: 3,
+  proxySessionLimit: 10000,
+  connectMaxTunnels: 128,
+  connectMaxPerToken: 16,
+  connectMaxPerUser: 32,
+  connectIdleMs: 120000,
+  connectDialMs: 10000,
   upstreamIdleMs: parseInt(process.env.UPSTREAM_TIMEOUT_MS || "120000", 10),
+  // Bound encoded input, decoded text and the final rewritten representation.
   maxRewriteBytes: parseInt(process.env.MAX_REWRITE_BYTES || String(20 * 1024 * 1024), 10),
   maxCookies: 100,
   maxCookieValue: 8192,
@@ -72,12 +84,20 @@ const cfg = {
 const ALLOWED_HOSTS = new Set([
   "claude.ai", "www.claude.ai", "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com",
   "a.claude.ai", "a-cdn.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
-  // reachable via /p/ if asked, but their URLs are NOT rewritten (iframes must keep their origin)
+  // Artifact families are recognized here, but excluded from reverse routes below.
   "claudeusercontent.com", "www.claudeusercontent.com", "gdrive.claudeusercontent.com",
   "sandbox.claudemcpcontent.com",
 ]);
+const CONNECT_DEPENDENCY_HOSTS = new Set(["cdn.jsdelivr.net", "cdnjs.cloudflare.com", "unpkg.com", "fonts.googleapis.com", "fonts.gstatic.com", "esm.sh", "cdn.tailwindcss.com", "code.jquery.com", "cdn.plot.ly"]);
 const ALLOWED_SUFFIXES = [".claudeusercontent.com", ".claudemcpcontent.com"];
+function canonicalHost(value) {
+  const host = String(value || "").toLowerCase().replace(/\.$/, "");
+  if (host.length > 253 || !host.split(".").every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return "";
+  return host;
+}
 function allowedHost(host) {
+  host = canonicalHost(host);
+  if (!host) return false;
   return ALLOWED_HOSTS.has(host) || ALLOWED_SUFFIXES.some(x => host.endsWith(x));
 }
 // Session cookies are sent ONLY to these hosts.
@@ -107,6 +127,14 @@ function userFile(user) {
 const jars = new Map();
 
 function nowSec() { return Math.floor(Date.now() / 1000); }
+
+// Error messages from JSON.parse and filesystem APIs can contain cookie material
+// or filenames. Log only a known error classification, never the input excerpt.
+function safeError(error) {
+  if (error instanceof SyntaxError) return "invalid JSON";
+  const code = error && error.code;
+  return typeof code === "string" && /^(?:E[A-Z0-9_]{1,60}|ERR_[A-Z0-9_]{1,60})$/.test(code) ? code : "operation failed";
+}
 
 // ---- optional encryption at rest (AES-256-GCM). Plain files are still readable (migration).
 function seal(plain) {
@@ -140,7 +168,7 @@ function migrateAll() {
       const tmp = file + "." + process.pid + ".tmp";
       fs.writeFileSync(tmp, seal(raw.trim() ? raw : '{"cookies":[]}'), { mode: 0o600 });
       fs.renameSync(tmp, file); n++;
-    } catch (e) { console.error("[cookies] migrate " + f + ": " + e.message); }
+    } catch (e) { console.error("[cookies] migration failed: " + safeError(e)); }
   }
   return n;
 }
@@ -164,7 +192,7 @@ function loadJar(user) {
       }
     }
   } catch (e) {
-    console.error("[cookies] user=" + user + " unreadable jar: " + e.message);
+    console.error("[cookies] user=" + sanitizeUser(user) + " unreadable jar: " + safeError(e));
   }
   jars.set(user, jar);
   return jar;
@@ -237,7 +265,7 @@ function captureSetCookies(user, setCookies) {
     console.log("[cookies] user=" + user + " jar updated (" + jar.cookies.size + " cookies)");
     return true;
   } catch (e) {
-    console.error("[cookies] user=" + user + " cannot persist jar: " + e.message);
+    console.error("[cookies] user=" + sanitizeUser(user) + " cannot persist jar: " + safeError(e));
     return false;
   }
 }
@@ -306,22 +334,29 @@ function listUsers() {
 // Anything that can reveal the real client, the proxy chain, or Cloudflare's view of the client.
 const DROP_EXACT = new Set([
   "host", "cookie", "origin", "referer", "accept-encoding",
-  "authorization", "proxy-authorization", "x-remote-user",
+  "authorization", "proxy-authorization", "x-remote-user", "x-gateway-previous-proxy-token",
   "forwarded", "via", "x-real-ip", "true-client-ip", "x-client-ip", "client-ip",
   "cdn-loop", "x-request-id", "x-correlation-id", "dnt",
   // hop-by-hop
   "connection", "keep-alive", "proxy-connection", "te", "trailer", "upgrade", "transfer-encoding",
 ]);
 const DROP_PREFIX = ["cf-", "x-forwarded-", "x-envoy-", "x-amzn-", "x-azure-", "fastly-", "x-vercel-"];
+const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
+
+function connectionHeaders(headers) {
+  return new Set(String(headers.connection || "").split(",").map(x => x.trim().toLowerCase()).filter(Boolean));
+}
 
 function buildUpstreamHeaders(inHeaders, host, cookieHeader, opts) {
   const out = {};
+  const connection = connectionHeaders(inHeaders);
   for (const [k, v] of Object.entries(inHeaders)) {
     const key = k.toLowerCase();
-    if (DROP_EXACT.has(key) || DROP_PREFIX.some(p => key.startsWith(p))) continue;
+    if (DROP_EXACT.has(key) || HOP_BY_HOP.has(key) || connection.has(key) || DROP_PREFIX.some(p => key.startsWith(p))) continue;
     out[key] = v;
   }
   out["host"] = host;
+  out["accept-encoding"] = "identity";
   out["accept-language"] = "en-US,en;q=0.9";
   if (opts && opts.ws) { out["connection"] = "Upgrade"; out["upgrade"] = "websocket"; out["origin"] = "https://claude.ai"; }
   if (cfg.fixedUA) {
@@ -342,15 +377,41 @@ function buildUpstreamHeaders(inHeaders, host, cookieHeader, opts) {
 // on behalf of the gateway origin, or advertise an alternative (HTTP/3) route.
 const DROP_RESPONSE = new Set(["set-cookie", "report-to", "reporting-endpoints", "nel", "alt-svc", "content-length"]);
 
+function buildResponseHeaders(headers, upgraded) {
+  const out = {};
+  const connection = connectionHeaders(headers);
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    if (DROP_RESPONSE.has(key) || HOP_BY_HOP.has(key) || connection.has(key)) continue;
+    out[key] = value;
+  }
+  if (upgraded) { out.connection = "Upgrade"; out.upgrade = "websocket"; }
+  return out;
+}
+
 function pub(h, p) { return "https://" + cfg.publicHost + (h === "claude.ai" ? "" : "/p/" + h) + p; }
 
 // Hosts whose URLs are rewritten to the gateway. Artifact hosts are deliberately absent:
 // PDF/artifact iframes must keep their real origin (postMessage checks it); the extension
-// only strips their frame-ancestors CSP so the gateway page can embed them.
+// appends the exact gateway origin to frame-ancestors while preserving artifact CSP.
 const REWRITE_HOSTS = [
   "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com",
   "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
 ];
+const REVERSE_HOSTS = new Set(["claude.ai", "www.claude.ai", ...REWRITE_HOSTS]);
+
+function rewriteLocation(value, host, urlPath) {
+  try {
+    const target = new URL(value, "https://" + host + urlPath);
+    const targetHost = canonicalHost(target.hostname);
+    if ((target.protocol === "https:" || target.protocol === "http:") && !target.username && !target.password
+        && (!target.port || target.port === "443") && REVERSE_HOSTS.has(targetHost)) {
+      return pub(targetHost, target.pathname + target.search + target.hash);
+    }
+  } catch (_) { /* Preserve malformed or non-HTTP redirect values unchanged. */ }
+  // Artifact and other external origins must not acquire the gateway's origin.
+  return value;
+}
 
 function rewriteUrls(s) {
   for (const h of REWRITE_HOSTS) {
@@ -366,6 +427,15 @@ function rewriteBody(buf, ct) {
   return Buffer.from(rewriteUrls(buf.toString("utf8")), "utf8");
 }
 
+function decodeRewriteBody(body, encoding) {
+  const coding = String(encoding || "identity").trim().toLowerCase();
+  if (coding === "identity") return Promise.resolve(body);
+  const decoder = coding === "gzip" ? zlib.gunzip : coding === "br" ? zlib.brotliDecompress : coding === "deflate" ? zlib.inflate : null;
+  if (!decoder) return Promise.reject(new Error("unsupported content encoding"));
+  // Bound decoded output as well as the encoded input buffered by createServer.
+  return new Promise((resolve, reject) => decoder(body, { maxOutputLength: cfg.maxRewriteBytes }, (error, decoded) => error ? reject(error) : resolve(decoded)));
+}
+
 function rewriteCsp(csp) {
   if (!csp) return csp;
   let out = csp;
@@ -375,7 +445,8 @@ function rewriteCsp(csp) {
       g.includes(cfg.publicHost) ? m : "frame-ancestors" + g + " https://" + cfg.publicHost);
   }
   // NOTE: artifact hosts (claudeusercontent/claudemcpcontent) must stay as-is in CSP —
-  // frame-src has to match the real frame URL; the extension strips frame-ancestors there.
+  // frame-src must match the real frame URL; the extension adds the exact gateway
+  // origin to artifact frame-ancestors while preserving the remaining CSP.
   for (const h of ["assets-proxy.anthropic.com", "assets.claude.ai", "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com"]) {
     out = out.split(h).join(cfg.publicHost);
   }
@@ -456,14 +527,19 @@ const EXT_FILES = { "claude-gateway-chrome.zip": "application/zip", "claude-gate
 
 function extIndexHtml() {
   const h = cfg.publicHost;
+  let signedFirefox = false;
+  try { signedFirefox = fs.statSync(path.join(cfg.extDir, "gateway-connector-firefox.xpi")).isFile(); } catch (_) { /* optional package */ }
   return '<!doctype html><meta charset="utf-8"><title>Claude Gateway — extension</title>' +
     '<body style="font-family:-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5">' +
-    '<h2>Claude Gateway — расширение</h2>' +
-    '<p>Сборка уже настроена на <b>' + h + '</b>.</p><ul>' +
-    '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge (zip)</a> — распакуйте, <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное»</li>' +
-    '<li><a href="/__ext/gateway-connector-firefox.xpi"><b>Firefox ≥ 128 (подписанный .xpi)</b></a> — просто откройте файл, установка в один клик</li>' +
-    '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox (zip, без подписи)</a> — <code>about:debugging</code> → «Load Temporary Add-on» (снимается после перезапуска)</li></ul>' +
-    '<p>В настройках расширения введите хост <code>' + h + '</code>, ваш логин и пароль.</p></body>';
+    '<h2>Claude Gateway — расширение 2.0.5</h2>' +
+    '<p>Создайте отдельный профиль браузера только для шлюза. При активной защите другие внешние сайты и запросы блокируются во всём профиле, включая новые окна и фоновые процессы.</p><ul>' +
+    '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge ≥ 125 (zip)</a> — скачайте свежую сборку, распакуйте, откройте <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное».</li>' +
+    '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox ≥ 140 (zip, без подписи)</a> — сборка для проверки. Защищённый маршрут артефактов пока не поддерживается и блокирует запросы (fail-closed); полноценная работа файлов и артефактов не подтверждена.</li>' +
+    (signedFirefox ? '<li><a href="/__ext/gateway-connector-firefox.xpi">Firefox ≥ 140 (подписанный .xpi)</a> — те же ограничения защищённого маршрута.</li>' : '<li>Подписанный Firefox XPI на этом сервере отсутствует.</li>') + '</ul>' +
+    '<p>Сборки не привязаны к домену. В настройках расширения (Options) введите домен шлюза <code>' + h + '</code>, ваш логин и пароль, затем нажмите «Сохранить и разрешить».</p>' +
+    '<p>Chrome запрашивает разрешение debugger для защищённого маршрута и совместимости артефактов; при подключении появится баннер отладки браузера. DevTools может конфликтовать с подключением расширения: закройте DevTools перед работой, а при потере защиты переподключите расширение и проверьте его статус.</p>' +
+    '<p>Inline-preview артефактов, которым требуется изменение CSP-заголовков, ограничен body 8 MiB. Файлы с <code>Content-Disposition: attachment</code> идут через штатную загрузку браузера без этого буфера; поддержка каждого типа загрузки не гарантируется.</p>' +
+    '<p>После обновления расширения перезагрузите его на странице расширений и сделайте hard reload страницы Claude: Ctrl+Shift+R или ⌘+Shift+R. Перед работой проверьте в расширении, что защищённый маршрут активен.</p></body>';
 }
 
 function serveExt(req, res) {
@@ -488,9 +564,11 @@ function resolveTarget(rawUrl) {
   let host, urlPath;
   const m = rawUrl.match(/^\/p\/([^\/?#]+)(\/.*)?$/);
   if (m) {
-    host = m[1].toLowerCase();
+    host = canonicalHost(m[1]);
     urlPath = m[2] || "/";
-    if (!allowedHost(host)) return null;
+    // Artifact HTML/JS is user-generated and must retain its isolated real origin.
+    // Serving it below /p/ would give it the gateway's cookies and API access.
+    if (!allowedHost(host) || isArtifactProxyHost(host)) return null;
   } else { host = "claude.ai"; urlPath = rawUrl; }
   if (!urlPath.startsWith("/")) return null;
   return { host, urlPath };
@@ -506,9 +584,8 @@ function handleUpgrade(req, socket) {
   const preq = https.request({ hostname: t.host, port: 443, path: t.urlPath, method: "GET", headers });
   preq.on("upgrade", (pres, psock, phead) => {
     let out = "HTTP/1.1 101 Switching Protocols\r\n";
-    for (let i = 0; i < pres.rawHeaders.length; i += 2) {
-      if (pres.rawHeaders[i].toLowerCase() === "set-cookie") continue;
-      out += pres.rawHeaders[i] + ": " + pres.rawHeaders[i + 1] + "\r\n";
+    for (const [name, value] of Object.entries(buildResponseHeaders(pres.headers, true))) {
+      for (const item of Array.isArray(value) ? value : [value]) out += name + ": " + item + "\r\n";
     }
     socket.write(out + "\r\n");
     if (phead && phead.length) socket.write(phead);
@@ -523,7 +600,9 @@ function handleUpgrade(req, socket) {
     pres.resume();
     console.log("[ws] " + (user || "-") + " " + t.host + " " + redactPath(t.urlPath) + " -> " + pres.statusCode);
   });
-  preq.on("error", (e) => { console.error("[ws] " + t.host + " " + e.message); socket.destroy(); });
+  preq.setTimeout(cfg.upstreamIdleMs, () => preq.destroy());
+  socket.on("close", () => preq.destroy());
+  preq.on("error", (e) => { console.error("[ws] " + t.host + " " + safeError(e)); socket.destroy(); });
   preq.end();
 }
 
@@ -548,7 +627,17 @@ function createServer() {
     }
     const user = sanitizeUser(req.headers["x-remote-user"]);
     if (pathOnly === "/__health") {
-      return json(res, 200, { ok: true, users: jars.size, user: user, session: user ? sessionState(user) : "none", connectProxy: cfg.connectAdvertise || null });
+      return json(res, 200, { ok: true, users: jars.size, user: user, session: user ? sessionState(user) : "none", connectProxy: connectReady() ? "https://" + proxyEndpoint().host + ":" + proxyEndpoint().port : null, connectReady: connectReady() });
+    }
+    if (pathOnly === "/__proxy-session") {
+      if (req.method !== "POST") { res.setHeader("allow", "POST"); return json(res, 405, { error: "method_not_allowed" }); }
+      if (!user || user !== req.headers["x-remote-user"]) return json(res, 401, { error: "unauthorized" });
+      if (req.headers["x-gateway-proxy-session"] !== "1" || (req.headers.origin && req.headers.origin !== "https://" + cfg.publicHost && !/^(?:chrome-extension|moz-extension):\/\/[a-zA-Z0-9-]+$/.test(req.headers.origin))) return json(res, 403, { error: "forbidden_origin" });
+      const previousToken = req.headers["x-gateway-previous-proxy-token"];
+      if (previousToken !== undefined && (typeof previousToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(previousToken))) return json(res, 400, { error: "invalid_previous_token" });
+      if (!connectReady()) return json(res, 503, { error: "secure_proxy_unavailable" });
+      const session = mintProxySession(user, Date.now(), previousToken);
+      return json(res, session ? 200 : 503, session || { error: "session_capacity" });
     }
     if (pathOnly === "/__admin/status") {
       if (!user || !cfg.adminUsers.includes(user)) { res.writeHead(403); return res.end("forbidden"); }
@@ -580,8 +669,15 @@ function createServer() {
     }
 
     const proxyReq = https.request({ hostname: host, port: 443, path: urlPath, method: req.method, headers }, (up) => {
-      const rh = {};
-      for (const [k, v] of Object.entries(up.headers)) if (!DROP_RESPONSE.has(k)) rh[k] = v;
+      const rh = buildResponseHeaders(up.headers);
+      const failResponse = () => {
+        if (res.destroyed || res.writableEnded) return;
+        if (res.headersSent) res.destroy();
+        else { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); }
+      };
+      up.once("error", failResponse);
+      up.once("aborted", failResponse);
+      res.once("close", () => { if (!up.complete) up.destroy(); });
 
       if (sendsCookies && user) {
         const had = hasSession(user);
@@ -595,11 +691,14 @@ function createServer() {
       }
       if (rh["content-security-policy"]) rh["content-security-policy"] = rewriteCsp(rh["content-security-policy"]);
       const rewriteHeader = (v) => Array.isArray(v) ? v.map(rewriteUrls) : rewriteUrls(v);
-      if (rh["location"]) rh["location"] = rewriteHeader(rh["location"]);
+      if (rh["location"]) rh["location"] = Array.isArray(rh["location"])
+        ? rh["location"].map(value => rewriteLocation(value, host, urlPath)) : rewriteLocation(rh["location"], host, urlPath);
       if (rh["link"]) rh["link"] = rewriteHeader(rh["link"]);
 
       const ct = String(rh["content-type"] || "");
-      const rewritable = ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript");
+      const preserveBody = req.method === "HEAD" || [204, 205, 304].includes(up.statusCode) || up.statusCode === 206 || !!req.headers.range || !!rh["content-range"]
+        || /^\s*attachment\s*(?:;|$)/i.test(String(rh["content-disposition"] || ""));
+      const rewritable = !preserveBody && (ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript"));
       const cl = parseInt(up.headers["content-length"] || "0", 10);
       const canCache = cacheable && up.statusCode === 200 && cl > 0 && cl <= cfg.cacheMaxItem;
 
@@ -616,104 +715,251 @@ function createServer() {
         if (size > cfg.maxRewriteBytes) { aborted = true; up.destroy(); if (!res.headersSent) { res.writeHead(502); } res.end(); return; }
         chunks.push(c);
       });
-      up.on("end", () => {
-        if (aborted) return;
-        let body = Buffer.concat(chunks);
-        if (rewritable) {
-          body = rewriteBody(body, ct);
-          rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
+      up.on("end", async () => {
+        if (aborted || res.destroyed || res.writableEnded) return;
+        try {
+          let body = Buffer.concat(chunks);
+          if (rewritable) {
+            body = await decodeRewriteBody(body, up.headers["content-encoding"]);
+            if (res.destroyed || res.writableEnded) return;
+            body = rewriteBody(body, ct);
+            if (body.length > cfg.maxRewriteBytes) return failResponse();
+            // Rewritten bytes form a new identity representation, so origin byte
+            // validators and range support no longer describe the response.
+            for (const name of ["content-encoding", "etag", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
+            rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
+          }
+          rh["content-length"] = body.length;
+          if (canCache) {
+            const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
+            cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
+          }
+          console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
+          res.writeHead(up.statusCode, rh);
+          res.end(body);
+        } catch (_) {
+          failResponse();
         }
-        rh["content-length"] = body.length;
-        if (canCache) {
-          const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
-          cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
-        }
-        console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
-        res.writeHead(up.statusCode, rh);
-        res.end(body);
       });
     });
 
     proxyReq.setTimeout(cfg.upstreamIdleMs, () => proxyReq.destroy(new Error("upstream idle timeout")));
     proxyReq.on("error", (e) => {
-      console.error("[upstream] " + host + " " + logPath + " " + e.message);
-      if (!res.headersSent) { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); } else res.end();
+      console.error("[upstream] " + host + " " + logPath + " " + safeError(e));
+      if (!res.headersSent) { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); } else res.destroy();
     });
     req.on("aborted", () => proxyReq.destroy());
+    res.once("close", () => { if (!res.writableEnded) proxyReq.destroy(); });
     req.pipe(proxyReq); // stream the body — no buffering of uploads
   });
   server.on("upgrade", handleUpgrade);
-  server.on("connect", handleConnect);
+  // Never accept proxy credentials or tunnels on the internal HTTP listener.
+  server.on("connect", (req, socket) => socket.end("HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"));
   return server;
 }
 
 // Artifact iframes must keep their real origin (postMessage checks it) while the
 // TCP connection comes from this server, so the user's IP is not revealed.
 function isArtifactProxyHost(host) {
-  host = String(host || "").toLowerCase().replace(/\.$/, "");
+  host = canonicalHost(host);
   return host === "claudeusercontent.com" || host.endsWith(".claudeusercontent.com")
     || host === "claudemcpcontent.com" || host.endsWith(".claudemcpcontent.com");
 }
 
-const connectAuthCache = new Map();
-function verifyProxyAuth(header) {
-  const now = Date.now();
-  const hit = connectAuthCache.get(header);
-  if (hit && hit.exp > now) return Promise.resolve(hit.ok);
-  return new Promise((resolve) => {
-    const r = https.request({
-      hostname: cfg.connectAuthHost, port: cfg.connectAuthPort, path: "/__health", method: "GET", timeout: 4000,
-      servername: cfg.publicHost, rejectUnauthorized: false,
-      headers: { host: cfg.publicHost, authorization: header },
-    }, (res) => {
-      res.resume();
-      const ok = res.statusCode === 200;
-      connectAuthCache.set(header, { ok, exp: now + 60000 });
-      if (connectAuthCache.size > 500) connectAuthCache.clear();
-      resolve(ok);
-    });
-    r.on("error", () => resolve(false));
-    r.on("timeout", () => { r.destroy(); resolve(false); });
-    r.end();
-  });
+function parseConnectTarget(target) {
+  const match = /^([^:]+):443$/.exec(String(target || ""));
+  if (!match) return null;
+  const host = canonicalHost(match[1]);
+  return host && (isArtifactProxyHost(host) || CONNECT_DEPENDENCY_HOSTS.has(host)) ? host : null;
 }
 
+// Tokens are separate from gateway Basic credentials; only their digest is retained.
+const proxySessions = new Map();
+let liveConnectServers = 0;
+let activeTunnels = 0;
+const userTunnels = new Map();
+function proxyEndpoint() {
+  try {
+    const endpoint = new URL(cfg.connectAdvertise.includes("://") ? cfg.connectAdvertise : "https://" + cfg.connectAdvertise);
+    if (endpoint.protocol !== "https:" || !endpoint.hostname || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash) return null;
+    const host = endpoint.hostname;
+    if (!(net.isIP(host) || canonicalHost(host))) return null;
+    return { scheme: "https", host, port: Number(endpoint.port || 443) };
+  } catch (_) { return null; }
+}
+function readConnectCredentials() {
+  if (!cfg.connectTlsCert || !cfg.connectTlsKey || !proxyEndpoint()) throw new Error("TLS CONNECT is not configured");
+  const cert = fs.readFileSync(cfg.connectTlsCert), key = fs.readFileSync(cfg.connectTlsKey);
+  const x509 = new crypto.X509Certificate(cert);
+  const now = Date.now(), endpoint = proxyEndpoint();
+  if (now < Date.parse(x509.validFrom) || now >= Date.parse(x509.validTo)) throw new Error("TLS certificate expired or not yet valid");
+  if (!(net.isIP(endpoint.host) ? x509.checkIP(endpoint.host) : x509.checkHost(endpoint.host))) throw new Error("TLS certificate identity mismatch");
+  tls.createSecureContext({ cert, key, minVersion: "TLSv1.2" });
+  return { cert, key, minVersion: "TLSv1.2" };
+}
+function connectReady() {
+  if (!liveConnectServers || !proxyEndpoint()) return false;
+  try { readConnectCredentials(); return true; } catch (_) { return false; }
+}
+function pruneProxySessions(now = Date.now()) {
+  for (const [digest, session] of proxySessions) if (session.expiresAt <= now) revokeProxySession(digest);
+}
+function revokeProxySession(digest) {
+  const session = proxySessions.get(digest);
+  if (!session) return;
+  proxySessions.delete(digest);
+  for (const socket of session.sockets) socket.destroy();
+}
+function mintProxySession(user, now = Date.now(), previousToken) {
+  if (!user || sanitizeUser(user) !== user || (previousToken !== undefined && (typeof previousToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(previousToken)))) return null;
+  pruneProxySessions(now);
+  const removals = new Set();
+  if (previousToken) {
+    const previousDigest = crypto.createHash("sha256").update(previousToken).digest("hex");
+    const previous = proxySessions.get(previousDigest);
+    // Possession of the exact bearer secret authorizes revoking only that token,
+    // including after switching gateway accounts. Never disclose its owner.
+    // An own token frees an own profile slot; a foreign token frees only global
+    // capacity because it was never included in this user's owned list below.
+    // Unknown/expired tokens are ignored so restart/expiry recovery still works.
+    if (previous) removals.add(previousDigest);
+  }
+  const owned = [...proxySessions].filter(([digest, session]) => session.user === user && !removals.has(digest));
+  if (cfg.proxySessionsPerUser <= 0) return null;
+  while (owned.length >= cfg.proxySessionsPerUser) {
+    const [digest] = owned.shift();
+    removals.add(digest);
+  }
+  if (proxySessions.size - removals.size + 1 > cfg.proxySessionLimit) return null;
+  const proxyPassword = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = now + cfg.proxySessionTtlMs;
+  // All fallible planning is finished before revoking a still-valid credential.
+  proxySessions.set(crypto.createHash("sha256").update(proxyPassword).digest("hex"), { user, expiresAt, tunnels: 0, sockets: new Set() });
+  for (const digest of removals) revokeProxySession(digest);
+  return { proxyUsername: "gateway-proxy", proxyPassword, expiresAt, proxy: proxyEndpoint() };
+}
+function verifyProxyAuth(header, now = Date.now()) {
+  if (typeof header !== "string" || !/^Basic [A-Za-z0-9+/]+={0,2}$/.test(header) || header.length > 200) return null;
+  const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+  const match = /^gateway-proxy:([A-Za-z0-9_-]{43})$/.exec(decoded);
+  if (!match) return null;
+  const digest = crypto.createHash("sha256").update(match[1]).digest("hex");
+  const session = proxySessions.get(digest);
+  if (!session || session.expiresAt <= now) { revokeProxySession(digest); return null; }
+  return session;
+}
+// DNS answers are checked as a set and the selected address is pinned for dialing,
+// so a later DNS lookup cannot turn an approved hostname into an internal target.
+function isPublicAddress(address) {
+  const family = net.isIP(address);
+  if (family === 4) {
+    const [a, b, c] = address.split(".").map(Number);
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168 || (b === 88 && c === 99)))
+      || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
+  }
+  if (family === 6) {
+    const lower = address.toLowerCase();
+    const [prefix, subnet] = lower.split(":").map(group => parseInt(group || "0", 16));
+    return /^[23][0-9a-f]{3}:/.test(lower)
+      && !(prefix === 0x2001 && (subnet < 0x200 || subnet === 0xdb8))
+      && prefix !== 0x2002 && !(prefix === 0x3fff && subnet <= 0xfff);
+  }
+  return false;
+}
+async function resolveConnectAddress(host) {
+  const answers = await dns.lookup(host, { all: true, verbatim: true });
+  if (!answers.length || answers.some(answer => !isPublicAddress(answer.address))) throw new Error("non-public DNS answer");
+  return answers.find(answer => answer.family === 4) || answers[0];
+}
 function handleConnect(req, socket, head) {
   socket.on("error", () => socket.destroy());
-  const target = String(req.url || "");
-  const colon = target.lastIndexOf(":");
-  const host = (colon > 0 ? target.slice(0, colon) : target).toLowerCase();
-  const port = parseInt(colon > 0 ? target.slice(colon + 1) : "443", 10);
-  const deny = (code, extra) => socket.end("HTTP/1.1 " + code + "\r\n" + (extra || "") + "connection: close\r\ncontent-length: 0\r\n\r\n");
-  if (!isArtifactProxyHost(host) || port !== 443) { deny("403 Forbidden"); return; }
-  const auth = req.headers["proxy-authorization"] || req.headers["authorization"] || "";
-  const basic = String(auth).replace(/^Basic\s+/i, "");
-  if (!basic) { deny("407 Proxy Authentication Required", 'proxy-authenticate: Basic realm="gateway"\r\n'); return; }
-  verifyProxyAuth("Basic " + basic).then((ok) => {
+  const deny = (code, extra = "") => socket.end("HTTP/1.1 " + code + "\r\n" + extra + "connection: close\r\ncontent-length: 0\r\n\r\n");
+  if (!socket.encrypted || !connectReady()) return deny("503 Service Unavailable");
+  const host = parseConnectTarget(req.url);
+  if (!host) return deny("403 Forbidden");
+  const session = verifyProxyAuth(req.headers["proxy-authorization"]);
+  if (!session) return deny("407 Proxy Authentication Required", 'proxy-authenticate: Basic realm="gateway-proxy"\r\n');
+  if (activeTunnels >= cfg.connectMaxTunnels || session.tunnels >= cfg.connectMaxPerToken || (userTunnels.get(session.user) || 0) >= cfg.connectMaxPerUser) return deny("429 Too Many Requests");
+  activeTunnels++; session.tunnels++;
+  session.sockets.add(socket);
+  userTunnels.set(session.user, (userTunnels.get(session.user) || 0) + 1);
+  let up, released = false, resolving = true;
+  const release = () => {
+    // dns.lookup cannot be cancelled: retain the reservation until it settles,
+    // otherwise rapidly disconnected clients could enqueue unlimited DNS work.
+    if (released || resolving) return;
+    released = true; activeTunnels--; session.tunnels--;
+    session.sockets.delete(socket);
+    const count = userTunnels.get(session.user) - 1;
+    if (count) userTunnels.set(session.user, count); else userTunnels.delete(session.user);
+  };
+  const expiry = setTimeout(() => socket.destroy(), Math.max(1, session.expiresAt - Date.now()));
+  const dialDeadline = setTimeout(() => socket.destroy(), cfg.connectDialMs);
+  socket.setTimeout(cfg.connectIdleMs, () => socket.destroy());
+  socket.once("close", () => { clearTimeout(expiry); clearTimeout(dialDeadline); release(); if (up) up.destroy(); });
+  resolveConnectAddress(host).then(address => {
     if (socket.destroyed) return;
-    if (!ok) { deny("407 Proxy Authentication Required", 'proxy-authenticate: Basic realm="gateway"\r\n'); return; }
-    const up = net.connect(443, host, () => {
+    up = net.connect({ port: 443, host: address.address, family: address.family }, () => {
+      clearTimeout(dialDeadline);
       socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head && head.length) up.write(head);
       up.pipe(socket); socket.pipe(up);
-      console.log("[connect] " + host);
     });
+    up.setTimeout(cfg.connectIdleMs, () => up.destroy());
     up.on("error", () => socket.destroy());
-    socket.on("close", () => up.destroy());
     up.on("close", () => socket.destroy());
-  });
+  }).catch(() => { if (!socket.destroyed) deny("502 Bad Gateway"); })
+    .finally(() => { resolving = false; if (socket.destroyed) release(); });
 }
-
-function createConnectServer() {
-  const s = http.createServer((req, res) => { res.writeHead(405); res.end("connect only"); });
+function createConnectServer({ reloadMs = 30000 } = {}) {
+  const credentials = readConnectCredentials(); // No certificate means no listener.
+  const s = https.createServer({ ...credentials, handshakeTimeout: 10000, requestTimeout: 15000, headersTimeout: 10000 }, (req, res) => {
+    res.writeHead(405, { "connection": "close" }); res.end("connect only");
+  });
+  s.maxConnections = 256;
+  let counted = false, timer;
+  s.once("listening", () => {
+    liveConnectServers++; counted = true;
+    timer = setInterval(() => {
+      try { s.setSecureContext(readConnectCredentials()); }
+      catch (_) { /* connectReady() rejects sessions/tunnels until renewal succeeds. */ }
+      pruneProxySessions();
+    }, reloadMs);
+    timer.unref();
+  });
+  s.once("close", () => { if (counted) liveConnectServers--; clearInterval(timer); });
   s.on("connect", handleConnect);
   return s;
 }
 
+// Certificates may be issued after the process starts. Keep the HTTP gateway
+// available and retry TLS startup without ever opening a plaintext proxy.
+function startConnectListener({ retryMs = 30000 } = {}) {
+  let server = null, stopped = false;
+  const attempt = () => {
+    if (stopped || server) return;
+    try {
+      server = createConnectServer();
+      const candidate = server;
+      candidate.once("error", () => { if (server === candidate) server = null; candidate.close(() => {}); });
+      candidate.listen(cfg.connectPort, cfg.listen);
+    } catch (_) { server = null; }
+  };
+  const timer = setInterval(attempt, retryMs);
+  timer.unref();
+  attempt();
+  return {
+    get server() { return server; },
+    close() { stopped = true; clearInterval(timer); if (server) server.close(); }
+  };
+}
+
 module.exports = {
-  cfg, ALLOWED_HOSTS, COOKIE_HOSTS,
+  cfg, ALLOWED_HOSTS, COOKIE_HOSTS, CONNECT_DEPENDENCY_HOSTS, startConnectListener,
+  mintProxySession, verifyProxyAuth, proxyEndpoint, connectReady, isPublicAddress, resolveConnectAddress,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
-  buildUpstreamHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost,
+  buildUpstreamHeaders, buildResponseHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost, parseConnectTarget,
   seal, unseal, migrateAll, isBanned, recordFail, cleanIp, cacheGet, cachePut, sessionState, noteClaudeResponse, listUsers,
 };
 
@@ -725,7 +971,6 @@ if (require.main === module) {
   createServer().listen(cfg.port, cfg.listen, () =>
     console.log("[gateway] listening on " + cfg.listen + ":" + cfg.port + " public host " + cfg.publicHost));
   if (cfg.connectPort) {
-    createConnectServer().listen(cfg.connectPort, cfg.listen, () =>
-      console.log("[gateway] CONNECT proxy on :" + cfg.connectPort + " advertised " + (cfg.connectAdvertise || "(unset)")));
+    startConnectListener();
   }
 }

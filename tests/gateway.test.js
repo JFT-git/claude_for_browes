@@ -40,6 +40,16 @@ test("cookies are not sent to non-claude hosts", () => {
   assert.ok(!g.COOKIE_HOSTS.has("assets.claude.ai"));
 });
 
+test("proxy hostnames are valid DNS names and CONNECT requires exactly port 443", () => {
+  assert.equal(g.parseConnectTarget("demo.frame.claudeusercontent.com:443"), "demo.frame.claudeusercontent.com");
+  assert.equal(g.parseConnectTarget("SANDBOX.CLAUDEM CPCONTENT.COM:443"), null);
+  assert.equal(g.parseConnectTarget("sandbox.claudemcpcontent.com:443".toUpperCase()), "sandbox.claudemcpcontent.com");
+  for (const target of ["localhost:443", "169.254.169.254:443", "claudeusercontent.com.evil.test:443", "a@claudeusercontent.com:443", "a..claudeusercontent.com:443", "a.claudeusercontent.com:443junk", "a.claudeusercontent.com:443:443", "a.claudeusercontent.com:80", "a.claudeusercontent.com", "[::1]:443"]) {
+    assert.equal(g.parseConnectTarget(target), null, target);
+  }
+  for (const host of ["a@b.claudeusercontent.com", "a..claudeusercontent.com", "a%00.claudeusercontent.com", "a:80.claudeusercontent.com"]) assert.equal(g.allowedHost(host), false);
+});
+
 test("cookie jar: capture, merge, expiry, deletion, permissions", () => {
   assert.strictEqual(g.cookieHeaderFor("bob"), "");
   fs.writeFileSync(path.join(dir, "bob.json"), '{"cookies":[]}');

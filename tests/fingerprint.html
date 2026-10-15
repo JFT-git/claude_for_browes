@@ -25,6 +25,10 @@
       perm: await Promise.race([navigator.permissions.query({ name: "geolocation" }).then(p => p.state), new Promise(r => setTimeout(() => r("pending"), 500))]),
     };
     document.getElementById("out").textContent = JSON.stringify(r);
+    document.documentElement.dataset.testStatus = "complete";
     document.title = "done";
-  } catch (e) { document.getElementById("out").textContent = "ERROR " + e + e.stack; } });
+  } catch (e) {
+    document.getElementById("out").textContent = "ERROR " + e;
+    document.documentElement.dataset.testStatus = "error";
+  } });
 </script>

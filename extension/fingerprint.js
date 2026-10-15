@@ -4,10 +4,12 @@
 //   * time zone  -> UTC           (Date, Intl, toLocale*String)
 //   * language   -> en-US         (navigator.language(s), Intl default locale, toLocale*)
 //   * geolocation-> permission denied (never reveals a position)
-//   * WebRTC     -> removed        (cannot leak local / real IP addresses)
+//   * WebRTC     -> removed in covered document realms
 //
 // Honest limits (also documented in SECURITY.md): this covers the page and same-origin
-// frames, NOT Web/Service Workers, and it cannot hide your IP (the gateway does that).
+// frames (including registered artifact origins), NOT Web/Service Workers.
+// Network privacy depends on the background's browser-wide route and guards;
+// JavaScript patches alone cannot prevent an IP leak.
 (function () {
   "use strict";
 
