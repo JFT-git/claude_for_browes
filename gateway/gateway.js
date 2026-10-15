@@ -30,6 +30,7 @@ const dns = require("dns").promises;
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const zlib = require("zlib");
 
 function parseKey(v) {
   if (!v) return null;
@@ -74,6 +75,7 @@ const cfg = {
   connectIdleMs: 120000,
   connectDialMs: 10000,
   upstreamIdleMs: parseInt(process.env.UPSTREAM_TIMEOUT_MS || "120000", 10),
+  // Bound encoded input, decoded text and the final rewritten representation.
   maxRewriteBytes: parseInt(process.env.MAX_REWRITE_BYTES || String(20 * 1024 * 1024), 10),
   maxCookies: 100,
   maxCookieValue: 8192,
@@ -354,6 +356,7 @@ function buildUpstreamHeaders(inHeaders, host, cookieHeader, opts) {
     out[key] = v;
   }
   out["host"] = host;
+  out["accept-encoding"] = "identity";
   out["accept-language"] = "en-US,en;q=0.9";
   if (opts && opts.ws) { out["connection"] = "Upgrade"; out["upgrade"] = "websocket"; out["origin"] = "https://claude.ai"; }
   if (cfg.fixedUA) {
@@ -422,6 +425,15 @@ function rewriteUrls(s) {
 function rewriteBody(buf, ct) {
   if (!ct || !(ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript"))) return buf;
   return Buffer.from(rewriteUrls(buf.toString("utf8")), "utf8");
+}
+
+function decodeRewriteBody(body, encoding) {
+  const coding = String(encoding || "identity").trim().toLowerCase();
+  if (coding === "identity") return Promise.resolve(body);
+  const decoder = coding === "gzip" ? zlib.gunzip : coding === "br" ? zlib.brotliDecompress : coding === "deflate" ? zlib.inflate : null;
+  if (!decoder) return Promise.reject(new Error("unsupported content encoding"));
+  // Bound decoded output as well as the encoded input buffered by createServer.
+  return new Promise((resolve, reject) => decoder(body, { maxOutputLength: cfg.maxRewriteBytes }, (error, decoded) => error ? reject(error) : resolve(decoded)));
 }
 
 function rewriteCsp(csp) {
@@ -684,7 +696,7 @@ function createServer() {
       if (rh["link"]) rh["link"] = rewriteHeader(rh["link"]);
 
       const ct = String(rh["content-type"] || "");
-      const preserveBody = req.method === "HEAD" || up.statusCode === 206 || !!req.headers.range || !!rh["content-range"]
+      const preserveBody = req.method === "HEAD" || [204, 205, 304].includes(up.statusCode) || up.statusCode === 206 || !!req.headers.range || !!rh["content-range"]
         || /^\s*attachment\s*(?:;|$)/i.test(String(rh["content-disposition"] || ""));
       const rewritable = !preserveBody && (ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript"));
       const cl = parseInt(up.headers["content-length"] || "0", 10);
@@ -703,21 +715,31 @@ function createServer() {
         if (size > cfg.maxRewriteBytes) { aborted = true; up.destroy(); if (!res.headersSent) { res.writeHead(502); } res.end(); return; }
         chunks.push(c);
       });
-      up.on("end", () => {
-        if (aborted) return;
-        let body = Buffer.concat(chunks);
-        if (rewritable) {
-          body = rewriteBody(body, ct);
-          rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
+      up.on("end", async () => {
+        if (aborted || res.destroyed || res.writableEnded) return;
+        try {
+          let body = Buffer.concat(chunks);
+          if (rewritable) {
+            body = await decodeRewriteBody(body, up.headers["content-encoding"]);
+            if (res.destroyed || res.writableEnded) return;
+            body = rewriteBody(body, ct);
+            if (body.length > cfg.maxRewriteBytes) return failResponse();
+            // Rewritten bytes form a new identity representation, so origin byte
+            // validators and range support no longer describe the response.
+            for (const name of ["content-encoding", "etag", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
+            rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
+          }
+          rh["content-length"] = body.length;
+          if (canCache) {
+            const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
+            cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
+          }
+          console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
+          res.writeHead(up.statusCode, rh);
+          res.end(body);
+        } catch (_) {
+          failResponse();
         }
-        rh["content-length"] = body.length;
-        if (canCache) {
-          const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
-          cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
-        }
-        console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
-        res.writeHead(up.statusCode, rh);
-        res.end(body);
       });
     });
 

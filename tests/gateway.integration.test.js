@@ -8,12 +8,15 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const zlib = require("node:zlib");
 const extensionVersion = require("../extension/manifest.chrome.json").version;
 
 const pdfFixture = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 256)), Buffer.from("\n%%EOF")]);
 const scriptFixture = Buffer.from('const asset = "https://assets.claude.ai/synthetic.js";');
 const pdfDisposition = "attachment; filename=synthetic.pdf; filename*=UTF-8''synthetic-%D1%82.pdf";
 const sha256 = body => crypto.createHash("sha256").update(body).digest("hex");
+const encoders = { gzip: zlib.gzipSync, br: zlib.brotliCompressSync, deflate: zlib.deflateSync };
+const compressedHtml = Buffer.from('<html><script src="https://assets.claude.ai/synthetic.js"></script></html>');
 const redirectFixtures = {
   root: { location: "/download.pdf?signature=synthetic" },
   parent: { location: "../download.pdf?signature=synthetic" },
@@ -54,7 +57,23 @@ function request(url, options = {}) {
 
 test.before(async () => {
   upstream = http.createServer((req, res) => {
-    if (req.url.startsWith("/redirect/")) {
+    if (req.url.startsWith("/compressed/")) {
+      const [, , encoding, kind] = req.url.split("/");
+      const plain = kind === "bomb" ? Buffer.alloc(64 * 1024, "x") : kind === "encoded-limit" ? crypto.randomBytes(4096) : kind === "html" ? compressedHtml : scriptFixture;
+      let body = Object.hasOwn(encoders, encoding) ? encoders[encoding](plain) : plain;
+      if (kind === "invalid") body = Buffer.from("SYNTHETIC_COMPRESSED_CANARY");
+      if (kind === "truncated") body = body.subarray(0, Math.max(1, body.length - 5));
+      const status = kind === "partial" ? 206 : ["204", "205", "304"].includes(kind) ? Number(kind) : 200;
+      const headers = { "content-type": kind === "html" || ["204", "205", "304"].includes(kind) ? "text/html" : "application/javascript",
+        "content-encoding": encoding === "stacked" ? "gzip, br" : encoding, etag: '"synthetic-encoded-etag"',
+        "last-modified": "Wed, 01 Jan 2025 00:00:00 GMT",
+        "content-md5": "synthetic", digest: "sha-256=synthetic", "content-digest": "sha-256=:synthetic:", "repr-digest": "sha-256=:synthetic:",
+        "accept-ranges": "bytes", "x-test-received-encoding": req.headers["accept-encoding"] || "absent" };
+      if (kind === "attachment") headers["content-disposition"] = 'attachment; filename="synthetic.js.gz"';
+      if (kind === "partial") headers["content-range"] = `bytes 0-${body.length - 1}/${body.length}`;
+      if (status !== 204) headers["content-length"] = status === 205 ? 0 : body.length;
+      res.writeHead(status, headers); return res.end([204, 205, 304].includes(status) ? undefined : body);
+    } else if (req.url.startsWith("/redirect/")) {
       const fixture = redirectFixtures[req.url.slice("/redirect/".length)];
       res.writeHead(fixture.status || 302, { location: fixture.location }); res.end();
     } else if (req.url === "/download-pdf") {
@@ -190,6 +209,106 @@ test("large uploads stream through without losing chunks", async () => {
   const response = await request("/upload", { method: "POST", chunks, headers: { "content-type": "application/octet-stream" } });
   assert.equal(response.status, 200);
   assert.equal(JSON.parse(response.body).bytes, 3 * 1024 * 1024);
+});
+
+test("gzip, Brotli and deflate HTML/scripts decode before rewriting and cache valid identity bytes", async () => {
+  for (const encoding of Object.keys(encoders)) {
+    for (const kind of ["html", "script"]) {
+      const response = await request("/compressed/" + encoding + "/" + kind);
+      assert.equal(response.status, 200);
+      const expected = kind === "html" ? '<html><script src="https://gateway.example.test/p/assets.claude.ai/synthetic.js"></script></html>' : 'const asset = "https://gateway.example.test/p/assets.claude.ai/synthetic.js";';
+      assert.deepEqual(response.body, Buffer.from(expected));
+      assert.equal(response.headers["content-length"], String(response.body.length));
+      assert.equal(response.headers["x-test-received-encoding"], "identity");
+      assert.equal(response.headers["last-modified"], "Wed, 01 Jan 2025 00:00:00 GMT");
+      for (const header of ["content-encoding", "etag", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) assert.equal(response.headers[header], undefined, header);
+    }
+  }
+  const url = "/p/assets.claude.ai/compressed/br/script";
+  const first = await request(url), cached = await request(url);
+  assert.equal(cached.headers["x-cache"], "HIT");
+  assert.deepEqual(cached.body, first.body);
+  assert.equal(cached.headers["content-encoding"], undefined);
+  assert.equal(cached.headers.etag, undefined);
+  assert.equal(cached.headers["content-length"], String(cached.body.length));
+});
+
+test("malformed, unsupported and oversized compressed rewrites return clean 502 responses", async () => {
+  for (const encoding of Object.keys(encoders)) {
+    for (const kind of ["invalid", "truncated"]) {
+      const response = await request("/compressed/" + encoding + "/" + kind);
+      assert.equal(response.status, 502); assert.equal(response.body.toString(), "bad gateway");
+      assert.equal(response.headers["content-encoding"], undefined);
+    }
+  }
+  for (const encoding of ["zstd", "stacked", "constructor"]) {
+    const response = await request("/compressed/" + encoding + "/script");
+    assert.equal(response.status, 502); assert.equal(response.body.toString(), "bad gateway");
+    assert.equal(response.headers["content-encoding"], undefined);
+  }
+  const previous = gateway.cfg.maxRewriteBytes; gateway.cfg.maxRewriteBytes = 1024;
+  try {
+    for (const encoding of Object.keys(encoders)) {
+      for (const kind of ["bomb", "encoded-limit"]) {
+        const response = await request("/compressed/" + encoding + "/" + kind);
+        assert.equal(response.status, 502, encoding + ":" + kind);
+        assert.equal(response.headers["content-encoding"], undefined);
+        assert.ok(!response.body.includes(Buffer.from("SYNTHETIC_COMPRESSED_CANARY")));
+      }
+    }
+    gateway.cfg.maxRewriteBytes = Math.max(scriptFixture.length, encoders.br(scriptFixture).length);
+    for (const encoding of ["br", "identity"]) {
+      const response = await request("/compressed/" + encoding + "/script");
+      assert.equal(response.status, 502, "rewritten output must fit even when encoded/decoded input fits");
+      assert.equal(response.body.toString(), "bad gateway");
+      assert.equal(response.headers["content-encoding"], undefined);
+    }
+  } finally { gateway.cfg.maxRewriteBytes = previous; }
+});
+
+test("compressed attachments, Range, HEAD and no-body responses preserve original bytes and validators", async () => {
+  for (const encoding of Object.keys(encoders)) {
+    const encoded = encoders[encoding](scriptFixture);
+    for (const [kind, headers, status] of [["attachment", {}, 200], ["partial", {}, 206], ["script", { range: "bytes=0-" }, 200]]) {
+      const response = await request("/compressed/" + encoding + "/" + kind, { headers });
+      assert.equal(response.status, status); assert.deepEqual(response.body, encoded);
+      assert.equal(response.headers["content-encoding"], encoding);
+      assert.equal(response.headers["content-length"], String(encoded.length));
+      assert.equal(response.headers.etag, '"synthetic-encoded-etag"');
+      assert.equal(response.headers["content-md5"], "synthetic");
+      assert.equal(response.headers["accept-ranges"], "bytes");
+    }
+    const head = await request("/compressed/" + encoding + "/script", { method: "HEAD" });
+    assert.equal(head.body.length, 0); assert.equal(head.headers["content-length"], String(encoded.length));
+    assert.equal(head.headers["content-encoding"], encoding); assert.equal(head.headers.etag, '"synthetic-encoded-etag"');
+  }
+  for (const status of [204, 205, 304]) {
+    const response = await request("/compressed/gzip/" + status);
+    assert.equal(response.status, status); assert.equal(response.body.length, 0);
+    assert.equal(response.headers["content-encoding"], "gzip"); assert.equal(response.headers.etag, '"synthetic-encoded-etag"');
+    if (status === 304) assert.equal(response.headers["content-length"], String(encoders.gzip(scriptFixture).length));
+  }
+});
+
+test("disconnecting a client during async decode cannot write or cache its abandoned response", { timeout: 3000 }, async () => {
+  const originalGunzip = zlib.gunzip;
+  let started, finish, finished;
+  const decoding = new Promise(resolve => { started = resolve; });
+  const decoded = new Promise(resolve => { finished = resolve; });
+  zlib.gunzip = (body, options, callback) => {
+    finish = () => originalGunzip(body, options, (error, output) => { callback(error, output); finished(); });
+    started();
+  };
+  const url = "/p/assets.claude.ai/compressed/gzip/abort";
+  const req = http.request({ hostname: "127.0.0.1", port, path: url });
+  req.on("error", () => {});
+  try {
+    req.end(); await decoding;
+    const closed = new Promise(resolve => req.once("close", resolve)); req.destroy(); await closed;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    finish(); await decoded; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(gateway.cacheGet("assets.claude.ai/compressed/gzip/abort"), undefined);
+  } finally { zlib.gunzip = originalGunzip; req.destroy(); }
 });
 
 test("PDF downloads preserve exact binary bytes, attachment metadata and HEAD length", async () => {
