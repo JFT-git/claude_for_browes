@@ -417,16 +417,30 @@ test("CORS export pairs only an exact gateway initiating frame and streams the r
   await f.flush(() => f.calls.some(call => call.method === "Fetch.continueRequest" && call.params.interceptResponse));
   const continued = f.calls.find(call => call.method === "Fetch.continueRequest" && call.params.interceptResponse).params;
   assert.equal(continued.headers.find(header => header.name.toLowerCase() === "origin").value, "https://claude.ai");
-  f.emit({ tabId: 1 }, "Fetch.requestPaused", { ...request, responseStatusCode: 200, responseHeaders: [
+  f.emit({ tabId: 1 }, "Fetch.requestPaused", { ...request, responseStatusCode: 200, responseStatusText: "", responseHeaders: [
     { name: "Access-Control-Allow-Origin", value: "https://claude.ai" }, { name: "Vary", value: "Origin" },
     { name: "Content-Length", value: String(32 * 1024 * 1024) }, { name: "Content-Encoding", value: "gzip" }
   ] });
   await f.flush(() => f.calls.some(call => call.method === "Fetch.continueResponse"));
   const response = f.calls.find(call => call.method === "Fetch.continueResponse").params;
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "responsePhrase"), false, "HTTP/2's empty status text must use the CDP default, not an invalid empty phrase");
   assert.equal(response.responseHeaders[0].value, "https://gateway.example.test");
   assert.equal(response.responseHeaders[2].value, String(32 * 1024 * 1024));
   assert.equal(response.responseHeaders[3].value, "gzip");
   assert.equal(f.calls.some(call => ["Fetch.takeResponseBodyAsStream", "IO.read", "Fetch.fulfillRequest"].includes(call.method)), false);
+  await f.manager.stop();
+});
+
+test("CORS response preserves a nonempty HTTP status phrase", async () => {
+  const f = artifactDebuggerFixture(); await f.manager.configure("gateway.example.test");
+  const request = f.paused({ frameId: "root", resourceType: "Fetch", responseStatusCode: undefined, responseHeaders: undefined,
+    request: { url: f.frameURL, method: "GET", headers: { Origin: "https://gateway.example.test" } } });
+  f.emit({ tabId: 1 }, "Fetch.requestPaused", request);
+  await f.flush(() => f.calls.some(call => call.params?.interceptResponse));
+  f.emit({ tabId: 1 }, "Fetch.requestPaused", { ...request, responseStatusCode: 200, responseStatusText: "Custom Valid Phrase",
+    responseHeaders: [{ name: "Access-Control-Allow-Origin", value: "https://claude.ai" }] });
+  await f.flush(() => f.calls.some(call => call.method === "Fetch.continueResponse"));
+  assert.equal(f.calls.find(call => call.method === "Fetch.continueResponse").params.responsePhrase, "Custom Valid Phrase");
   await f.manager.stop();
 });
 

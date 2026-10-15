@@ -1,6 +1,6 @@
-// The debugger is used only to preserve an artifact response while extending its
-// frame-ancestors policy for an exact gateway-owned parent. Network routing and
-// proxy authentication remain owned by the background's fail-closed lifecycle.
+// The debugger preserves artifact frame policy and pairs narrow CORS header
+// compatibility for exact gateway-owned frames. Network routing and proxy
+// authentication remain owned by the background's fail-closed lifecycle.
 (function (root) {
   "use strict";
   const MAX_TABS = 32, MAX_SESSIONS = 256, MAX_FRAMES = 1024, MAX_RESPONSES = 4;
@@ -198,7 +198,9 @@
           if (!headers) { await command(source, "Fetch.continueRequest", { requestId: event.requestId }); return; }
           if (!await ownedTab(state) || !current(state) || !ownedURL(state.frames.get(paired.frameId)?.url)) throw new Error("Gateway tab navigated");
           const params = { requestId: event.requestId, responseCode: event.responseStatusCode, responseHeaders: headers };
-          if (typeof event.responseStatusText === "string") params.responsePhrase = event.responseStatusText;
+          // HTTP/2 has no reason phrase. CDP rejects an explicitly empty phrase;
+          // omitting it lets Chrome select the standard phrase for the status.
+          if (typeof event.responseStatusText === "string" && event.responseStatusText.length) params.responsePhrase = event.responseStatusText;
           await command(source, "Fetch.continueResponse", params);
           return;
         }

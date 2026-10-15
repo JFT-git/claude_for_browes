@@ -12,6 +12,7 @@ const path = require("node:path");
 const net = require("node:net");
 const http = require("node:http");
 const https = require("node:https");
+const http2 = require("node:http2");
 const tls = require("node:tls");
 const cp = require("node:child_process");
 const { chromium } = require("playwright");
@@ -29,6 +30,8 @@ for (let index = 0; index < CORS_LARGE_FIXTURE.length; index++) CORS_LARGE_FIXTU
 const CORS_LARGE_SHA256 = crypto.createHash("sha256").update(CORS_LARGE_FIXTURE).digest("hex");
 const CORS_HTML_EXPORT = Buffer.from(`<!doctype html><html><head><meta charset="utf-8"><title>synthetic CORS export</title></head><body><main id="cors-export">PUBLIC_CORS_FETCH_BLOB_EXPORT_READY</main></body></html>\n`, "utf8");
 const CORS_HTML_EXPORT_SHA256 = crypto.createHash("sha256").update(CORS_HTML_EXPORT).digest("hex");
+const CORS_H2_EXPORT = Buffer.from(`<!doctype html><html><head><meta charset="utf-8"><title>synthetic HTTP2 CORS export</title></head><body><main id="cors-h2-export">PUBLIC_HTTP2_CORS_BLOB_EXPORT_READY</main></body></html>\n`, "utf8");
+const CORS_H2_EXPORT_SHA256 = crypto.createHash("sha256").update(CORS_H2_EXPORT).digest("hex");
 function proxyTokenVersion(value) {
   return value === PROXY_TOKEN_A ? "A" : value === PROXY_TOKEN_B ? "B" : value === PROXY_TOKEN_C ? "C" : "unknown";
 }
@@ -82,7 +85,7 @@ const hosts = [
   "gateway.audit.test", "gateway.audit.test.evil.test", "sub.gateway.audit.test",
   "gateway.audit.testing", "unrelated.audit.test", "evil.audit.test",
   "unknown.claudeusercontent.com", "frame.claudemcpcontent.com", "proxy.audit.test",
-  "wrapper.claudeusercontent.com", "cdn.tailwindcss.com", "cdn.jsdelivr.net",
+  "wrapper.claudeusercontent.com", "cdn.tailwindcss.com", "cdn.jsdelivr.net", "h2.frame.claudemcpcontent.com",
 ];
 
 function listen(server) {
@@ -141,7 +144,8 @@ async function installPassiveFetchObserver(worker) {
       if (method !== "Fetch.requestPaused") return;
       const headers = Array.isArray(params?.responseHeaders) ? params.responseHeaders : [];
       events.push({ tabId: source.tabId, url: params?.request?.url || "", resourceType: params?.resourceType || "",
-        status: params?.responseStatusCode || 0, frameId: params?.frameId || "",
+        status: params?.responseStatusCode || 0, statusTextState: params?.responseStatusCode === undefined ? "request" : params?.responseStatusText === "" ? "empty" : typeof params?.responseStatusText === "string" ? "present" : "missing",
+        frameId: params?.frameId || "",
         hasAttachment: headers.some(header => header?.name?.toLowerCase() === "content-disposition" && /^attachment(?:\s*;|\s*$)/i.test(header?.value || "")) });
       const recorded = events[events.length - 1];
       recorded.contentType = headers.find(header => header?.name?.toLowerCase() === "content-type")?.value || "";
@@ -205,7 +209,7 @@ async function getPassiveAuthEvents(worker) {
   return worker.evaluate(() => globalThis.__browserAuditAuthEvents || []);
 }
 
-function makeProxy(server, proxyEvents, upstreamPort, getChallengeMode = () => "close", getAcceptedTokenVersions = () => new Set(["A"])) {
+function makeProxy(server, proxyEvents, upstreamPort, getChallengeMode = () => "close", getAcceptedTokenVersions = () => new Set(["A"]), getUpstreamPort = () => upstreamPort) {
   const sockets = new Set();
   server.on("connection", socket => {
     sockets.add(socket);
@@ -246,7 +250,7 @@ function makeProxy(server, proxyEvents, upstreamPort, getChallengeMode = () => "
         return;
       }
       proxyEvents.push({ kind: "connect", target, hasProxyAuthorization: !!authorization, tokenVersion, tokenMatches: validAuthorization });
-      const upstream = net.connect(upstreamPort, "127.0.0.1", () => {
+      const upstream = net.connect(getUpstreamPort(target), "127.0.0.1", () => {
         socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         if (extra.length) upstream.write(extra);
         socket.pipe(upstream);
@@ -432,6 +436,32 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
   });
   const tunnelPort = await listen(tunnelCollector);
 
+  const h2Sessions = [];
+  const liveH2Sessions = new Set();
+  const h2Collector = http2.createSecureServer({ key: keys.key, cert: keys.cert, allowHTTP1: true });
+  h2Collector.on("session", session => {
+    liveH2Sessions.add(session);
+    h2Sessions.push({ alpnProtocol: session.socket.alpnProtocol || "" });
+    session.once("close", () => liveH2Sessions.delete(session));
+  });
+  h2Collector.destroyConnections = () => { for (const session of liveH2Sessions) session.destroy(); };
+  h2Collector.on("stream", (stream, headers) => {
+    const host = String(headers[":authority"] || "").split(":")[0];
+    const requestPath = String(headers[":path"] || "/");
+    events.push({ kind: "tunneled-h2", host, path: requestPath, method: headers[":method"] || "",
+      origin: headers.origin, authorization: headers.authorization, cookie: headers.cookie,
+      hasProxyAuthorization: Object.keys(headers).some(name => name.toLowerCase() === "proxy-authorization") });
+    if (host === "h2.frame.claudemcpcontent.com" && requestPath === "/cors/h2-export") {
+      stream.respond({ ":status": 200, "content-type": "text/html; charset=utf-8", "content-length": String(CORS_H2_EXPORT.length),
+        "cache-control": "no-store", "access-control-allow-origin": "https://claude.ai" });
+      stream.end(CORS_H2_EXPORT);
+      return;
+    }
+    stream.respond({ ":status": 404, "content-type": "text/plain", "content-length": "0" });
+    stream.end();
+  });
+  const h2Port = await listen(h2Collector);
+
   const gateway = https.createServer(keys, (req, res) => {
     const requestPath = new URL(req.url, "https://gateway.audit.test").pathname;
     events.push({ kind: "gateway", host: req.headers.host?.split(":")[0], path: req.url, authorization: req.headers.authorization,
@@ -532,10 +562,11 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
     res.writeHead(200, { "content-type": "text/plain" }); res.end("synthetic http");
   });
   const plainPort = await listen(plain);
-  const proxy = makeProxy(tls.createServer(keys), proxyEvents, tunnelPort, () => proxyChallengeMode, () => acceptedProxyTokenVersions);
+  const proxy = makeProxy(tls.createServer(keys), proxyEvents, tunnelPort, () => proxyChallengeMode, () => acceptedProxyTokenVersions,
+    target => target.startsWith("h2.frame.claudemcpcontent.com:") ? h2Port : tunnelPort);
   closeActiveProxyTunnels = () => proxy.destroyConnections();
   const proxyPort = await listen(proxy);
-  const directHosts = new Set([hosts[1], hosts[2], hosts[3], hosts[4], hosts[5], hosts[6], hosts[7], "cdn.tailwindcss.com", "cdn.jsdelivr.net"]);
+  const directHosts = new Set([hosts[1], hosts[2], hosts[3], hosts[4], hosts[5], hosts[6], hosts[7], "cdn.tailwindcss.com", "cdn.jsdelivr.net", "h2.frame.claudemcpcontent.com"]);
   const resolver = [
     `MAP gateway.audit.test 127.0.0.1:${gatewayPort}`,
     ...[...directHosts].map(host => `MAP ${host} 127.0.0.1:${collectorPort}`),
@@ -1217,6 +1248,50 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
         "downloaded HTML bytes must match the expected synthetic fixture hash");
       expectOrigin("/cors/html-export", "https://claude.ai");
 
+      const h2Fetch = await page.evaluate(async () => {
+        try {
+          const response = await fetch("https://h2.frame.claudemcpcontent.com/cors/h2-export", { cache: "no-store" });
+          const blob = await response.blob();
+          window.__syntheticH2ExportBlob = blob;
+          return { resolved: true, status: response.status, blobBytes: blob.size, blobType: blob.type };
+        } catch (error) { return { resolved: false, errorName: error?.name || "Error" }; }
+      });
+      assert.deepEqual(h2Fetch, { resolved: true, status: 200, blobBytes: CORS_H2_EXPORT.length, blobType: "text/html" },
+        "HTTP/2 ACAO response must remain readable before it can be exported as a Blob");
+      assert.ok(h2Sessions.some(session => session.alpnProtocol === "h2"), "the fixture must negotiate real TLS ALPN h2, not HTTP/1.1 fallback");
+      const h2Request = events.find(event => event.kind === "tunneled-h2" && event.path === "/cors/h2-export");
+      assert.ok(h2Request, "HTTP/2 artifact request must reach its isolated TLS endpoint through the proxy");
+      assert.equal(h2Request.origin, "https://claude.ai", "the HTTP/2 request Origin must be narrowly rewritten");
+      assert.equal(h2Request.authorization, undefined);
+      assert.equal(h2Request.cookie, undefined);
+      assert.equal(h2Request.hasProxyAuthorization, false);
+      assert.equal(events.some(event => event.kind === "direct" && event.path === "/cors/h2-export"), false,
+        "HTTP/2 artifact requests must not escape the mandatory proxy");
+      const h2ResponseEvent = (await getPassiveFetchEvents(worker)).find(event => event.tabId === readiness.tabId
+        && event.url === "https://h2.frame.claudemcpcontent.com/cors/h2-export" && event.status === 200);
+      assert.ok(h2ResponseEvent, "the exact gateway-owned browser request must receive a native Fetch response event");
+      assert.equal(h2ResponseEvent.statusTextState, "empty", "HTTP/2 must exercise Chromium's empty response-status-text case");
+
+      const h2DownloadPromise = page.waitForEvent("download", { timeout: 12000 });
+      await page.evaluate(() => {
+        const anchor = document.createElement("a");
+        anchor.href = URL.createObjectURL(window.__syntheticH2ExportBlob);
+        anchor.download = "synthetic-http2-cors-export.html";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      });
+      const h2Download = await h2DownloadPromise;
+      assert.equal(h2Download.suggestedFilename(), "synthetic-http2-cors-export.html");
+      assert.equal(await h2Download.failure(), null);
+      const h2DownloadPath = await h2Download.path();
+      assert.ok(h2DownloadPath);
+      let h2DownloadedBytes;
+      try { fs.chmodSync(h2DownloadPath, 0o600); h2DownloadedBytes = fs.readFileSync(h2DownloadPath); }
+      finally { try { fs.unlinkSync(h2DownloadPath); } catch {} }
+      assert.ok(h2DownloadedBytes.equals(CORS_H2_EXPORT), "HTTP/2 CORS fetch-to-Blob download must preserve exact HTML bytes");
+      assert.equal(crypto.createHash("sha256").update(h2DownloadedBytes).digest("hex"), CORS_H2_EXPORT_SHA256);
+
       const head = await resultFor("/cors/head", { method: "HEAD" });
       assert.equal(head.resolved, true, "an approved HEAD response must pass the same narrow CORS path");
       assert.equal(head.status, 200);
@@ -1316,7 +1391,7 @@ test("packaged Chrome extension uses native network APIs and fails closed", { ti
     });
   } finally {
     if (context) await context.close();
-    await Promise.all([close(gateway), close(plain), close(directCollector), close(tunnelCollector), close(proxy)]);
+    await Promise.all([close(gateway), close(plain), close(directCollector), close(tunnelCollector), close(h2Collector), close(proxy)]);
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });

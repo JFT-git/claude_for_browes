@@ -29,7 +29,7 @@
 
 Расширение меняет часть браузерных API для страниц шлюза и артефактов: часовой пояс/локаль. WebRTC UDP ограничивается настройкой браузера. Оно не делает браузер анонимным и не нормализует экран, шрифты, GPU/canvas или TLS/HTTP2-отпечаток. Gateway по умолчанию передаёт Claude User-Agent браузера; `FIXED_UA` может его изменить и требует согласованной проверки client hints. Нельзя считать fingerprint активным, пока popup явно не подтверждает его регистрацию и не пройдена проверка раннего запуска скрипта в целевом браузере.
 
-Поддержка браузеров зависит от сборки и её минимальной версии в manifest. Для Chromium-сборки 2.0.4 требуется Chrome 125+ из-за OOPIF debugger sessions; для Firefox package minimum — 140, но secure CONNECT и artifact preview там намеренно fail-closed/unsupported. Не считайте Firefox полноценным клиентом.
+Поддержка браузеров зависит от сборки и её минимальной версии в manifest. Для Chromium-сборки 2.0.5 требуется Chrome 125+ из-за OOPIF debugger sessions; для Firefox package minimum — 140, но secure CONNECT и artifact preview там намеренно fail-closed/unsupported. Не считайте Firefox полноценным клиентом.
 
 Для Chromium artifact маршруты открываются только после защищённой проверки gateway, настройки HTTPS CONNECT и фиксированного no-body HTTPS `HEAD` через CONNECT. На свежей сессии нужны 2xx и реальный proxy-auth callback с новым токеном; timeout/redirect/auth failure оставляет маршруты закрытыми. Перед открытием применяется только точное временное правило к этому запросу, которое удаляет origin Authorization/Cookie и response Set-Cookie. При потере proxy-контроля разрешающее правило закрывается. Claude/API WebSocket пути пока fail-closed, пока их cookie-сессионный rewrite не подтверждён. Проверки реального выхода с момента старта, смены конфигурации и отказа proxy остаются обязательными для релизной оценки.
 
@@ -60,15 +60,24 @@
 | F14 | Claude/API WSS не проходил те же правила маршрутизации. | Эти WebSocket пути сейчас fail-closed и не заявлены как поддерживаемые. |
 | F15 | Gateway мог отдать одновременно `Transfer-Encoding` и `Content-Length`. | Эти заголовки исключаются из forwarded response headers; upstream-response regression test должен подтвердить поведение. |
 
-### Проверка релизного кандидата 2.0.4
+### Проверка релизного кандидата 2.0.5
+
+| Проверка | Результат и границы |
+|---|---|
+| Изменение HTTP/2 response handling | В CDP `Fetch.fulfillRequest` пустой `responsePhrase` не передаётся: HTTP/2 не задаёт reason phrase, а Chromium отклонял явно пустое значение. Непустой `responsePhrase` сохраняется. Это узкий механизм для HTTP/2; CORS scope, разрешения, минимальные версии и routing policy не менялись. |
+| Финальные automated checks | 148 Node.js и 29 Python-тестов прошли без пропусков; Firefox lint — 0 errors, 0 warnings, 0 notices. Отдельный source/helper набор Reviewer03 прошёл 84 checks. |
+| Изолированный native HTTP/2 gate | Reviewer04 подтвердил причинный кейс: HTTP/2 с пустым значением давал Chromium error `-32602`, а пропуск пустого значения позволил прочитать gzip-ответ размером 9 MiB с точным SHA-256. Интегрированный Chromium gate прошёл 18/18, включая independent repeat, с HTTP/2 и synthetic `fetch → Blob → native download` с точными bytes/name/hash. Это synthetic gate, не публичный owner E2E. |
+| Публичный owner E2E | Повтор после исправления ещё не завершён. В публичном прогоне 2.0.4 upstream вернул HTTP 200 и ожидаемый `Access-Control-Allow-Origin`; Chromium Fetch сообщил пустой status text, а расширение передало CDP пустой `responsePhrase`. CDP вернул `-32602` (invalid status code or phrase), и расширение заблокировало запрос до получения bytes или загрузки. Причина отказа подтверждена; это не CORS error. Кандидат 2.0.5 пропускает пустое поле, но его public outcome пока неизвестен. |
+
+### Проверка релизного кандидата 2.0.4 (исторический выпуск)
 
 | Проверка | Результат и границы |
 |---|---|
 | CORS наблюдение на VPS | Сравнение того же artifact GET показало HTTP 200 и ожидаемое тело, но `Access-Control-Allow-Origin` присутствовал только при запросе с точным `Origin: https://claude.ai`. Это узкое наблюдение одного route/ответа, не общая CORS-проверка. |
 | Финальные automated checks | 147 Node.js и 29 Python-тестов прошли без пропусков; Firefox 2.0.4 lint — 0 errors, 0 warnings, 0 notices. |
 | CORS implementation/native gate | В точном gateway/frame scope CORS helper переписывает request `Origin` с gateway origin на `https://claude.ai`, затем меняет только один matching response `Access-Control-Allow-Origin` обратно на gateway origin. Wildcard, credential grant, CSP/other-header changes и response-body reads не добавлены. Helper-specific suite — 7 checks; integrated native gate — 18/18 PASS, независимый reviewer06 повтор также прошёл 18/18 на test `0431c2d`. Синтетический `fetch → Blob → native download` сохранил exact bytes, filename и hash; 9.4 MiB gzip-decoded fixture прошёл с exact SHA без body buffering этим CORS path. |
-| Deployment smoke | На production развернуты проверенные 2.0.4 archive hashes; gateway owner health endpoint вернул успешный результат. Это smoke check, не полный public artifact E2E после CORS-изменения. |
-| Post-CORS public owner E2E | После обновления профиля проверка владельца ещё выполняется. Результаты 2.0.3 ниже не подтверждают работу нового 2.0.4 artifact-CORS пути. |
+| Deployment smoke | На production развернули проверенные 2.0.4 archive hashes; gateway owner health endpoint вернул успешный результат. Это smoke check, не подтверждение полного public artifact E2E. |
+| Public owner CORS flow | Upstream ответил HTTP 200 с ожидаемым CORS-заголовком. HTTP/2 Fetch вернул пустой status text; extension inspector передал пустой `responsePhrase`, CDP вернул `-32602` и запрос завершился блокировкой до bytes/download. Это был HTTP/2/CDP response-phrase отказ, а не CORS error. Причина теперь подтверждена; HTTP/2 fix для 2.0.5 описан выше, public rerun всё ещё ожидается. |
 
 ### Результаты релиза 2.0.3 (исторический релиз)
 
