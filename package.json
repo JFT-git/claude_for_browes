@@ -3,9 +3,15 @@
   "private": true,
   "description": "Gateway + browser extension (Chrome/Firefox) for claude.ai",
   "scripts": {
-    "test": "node --test tests/gateway.test.js",
+    "test": "node --test tests/gateway*.test.js tests/extension.test.js tests/extension.privacy.test.js tests/artifact-csp.test.js tests/install.test.js tests/fingerprint-runner.test.js && python3 -m unittest discover -s tests -p frontdoor_test.py",
     "test:fingerprint": "sh tests/run-fingerprint-chrome.sh",
-    "lint:firefox": "npx web-ext lint --self-hosted --source-dir extension/dist/firefox"
+    "test:browser": "npm run build:extension && node --test tests/extension.browser.test.js",
+    "build:extension": "sh extension/build.sh",
+    "lint:firefox": "web-ext lint --self-hosted --source-dir extension/dist/firefox"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1",
+    "web-ext": "10.7.0"
   },
   "license": "MIT"
 }

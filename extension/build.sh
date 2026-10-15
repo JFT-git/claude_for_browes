@@ -3,7 +3,7 @@
 # One build for all domains — the user enters their gateway host in Options.
 set -e
 cd "$(dirname "$0")"
-SHARED="background.js popup.html popup.js options.html options.js fingerprint.js icon48.png icon128.png"
+SHARED="background.js artifact-csp.js artifact-debugger.js popup.html popup.js options.html options.js fingerprint.js proxy-block-rules.json privacy-rules.js icon48.png icon128.png"
 rm -rf dist && mkdir -p dist
 for b in chrome firefox; do
   mkdir -p "dist/$b"

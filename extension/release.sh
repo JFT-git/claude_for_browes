@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build UNCONFIGURED (placeholder) packages into ../releases/ for publishing in the repo.
-# Run on a clean checkout (before ./configure.sh), otherwise placeholders are already replaced.
+# Build universal Chrome/Firefox packages into ../releases/ for publishing.
+# Users enter the gateway host and credentials in extension Options after loading.
 set -e
 cd "$(dirname "$0")"
 V=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' manifest.chrome.json | head -1)

@@ -1,34 +1,37 @@
 # claude_for_browes
 
-Доступ к оригинальному веб-интерфейсу Claude.ai через собственный шлюз. Шлюз хранит session-cookies Claude на сервере и подставляет их в проксируемые запросы, поэтому браузер клиента рендерит Claude **нативно** — без видео-стриминга удалённого рабочего стола, без задержки ввода, с нормальным русским вводом, буфером обмена и drag-and-drop файлов.
+Доступ к веб-интерфейсу Claude.ai через собственный шлюз. Обычные запросы Claude проходят через gateway, который хранит session-cookies на сервере и подставляет их к разрешённым upstream-запросам. Поддерживаемые артефакты сохраняют исходный browser origin и используют отдельный защищённый HTTPS CONNECT-маршрут. Основной интерфейс работает в браузере клиента.
 
-Claude видит **IP сервера**, а не клиента. Полезно, когда claude.ai гео-заблокирован или вы не хотите держать cookies Claude на машине клиента.
+Claude получает обычные запросы с IP сервера, а не клиента. Клиентский browser напрямую подключается к IP сервера для HTTPS CONNECT к artifact/CDN-доменам, поэтому этот IP виден клиентской сети. Cookies Claude хранятся на сервере. Использование прокси не гарантирует доступность сервиса и может противоречить условиям Anthropic.
 
 ## Как это работает
 
 ```mermaid
 flowchart LR
     subgraph CLIENT["💻 Клиент — Mac"]
-        A["🌐 Chrome / Firefox<br/>профиль «Claude»"]
-        B["🧩 Расширение<br/>редирект + basic_auth<br/>отпечаток: UTC · en-US · WebRTC off"]
+        A["🌐 Выделенный профиль Chromium<br/>только для шлюза"]
+        B["🧩 Расширение<br/>точный HTTPS gateway auth<br/>fail-closed artifact routing"]
         A --- B
     end
 
-    CF["☁️ Cloudflare<br/>скрывает IP клиента"]
+    CF["☁️ Cloudflare<br/>опционально: Claude-домен"]
 
-    subgraph SERVER["🖥️ Сервер — DigitalOcean (Amsterdam)"]
-        C["🔐 Caddy<br/>TLS + basic_auth"]
+    subgraph SERVER["🖥️ Сервер"]
+        F["🔒 TLS front door :443"]
+        C["🔐 Caddy<br/>TLS domain + HTTP-01 :80"]
         D["⚙️ Gateway<br/>подставляет cookies"]
         E[("🍪 cookies/<br/>alice.json<br/>bob.json")]
-        C -->|"X-Remote-User"| D
+        F --> C
+        C -->|"внутренняя сеть"| D
         D --- E
     end
 
-    AI["🤖 claude.ai<br/>видит IP сервера (NL)"]
+    AI["🤖 claude.ai<br/>видит IP сервера"]
 
-    B -->|"https://claude.ai"| CF
-    CF --> C
+    B -->|"HTTPS Claude"| CF
+    CF --> F
     D -->|"session-cookies"| AI
+    B -.->|"TLS CONNECT :443<br/>артефакты / CDN"| F
 
     style AI fill:#4f46e5,color:#fff,stroke:#312e81
     style CF fill:#f59e0b,color:#fff,stroke:#b45309
@@ -41,11 +44,12 @@ flowchart LR
 
 | Сторона | Видит |
 |---|---|
-| Провайдер клиента | только соединение с Cloudflare |
-| Cloudflare | реальный IP клиента |
-| **claude.ai** | **только IP сервера (Amsterdam, NL)** + session-cookies |
+| Провайдер клиента | видит IP сервера и метаданные прямого CONNECT; TLS содержимое CONNECT остаётся зашифровано |
+| Cloudflare (если включён) | клиентский IP и HTTPS-трафик Claude-домена до шлюза |
+| **Claude** | upstream-запросы с IP сервера и session-cookies |
+| **Оператор CONNECT** | TLS-туннель до разрешённого artifact/CDN host; внутреннее TLS-содержимое остаётся зашифровано до browser origin |
 
-### Первый вход пользователя (self-service, без удалённого браузера)
+### Предполагаемый вход через gateway
 
 ```mermaid
 sequenceDiagram
@@ -66,29 +70,31 @@ sequenceDiagram
     G-->>U: ✅ Claude авторизован
 ```
 
+Это описание ожидаемого cookie-capture потока, а не подтверждение полного публичного magic-link/OAuth E2E. Google/Apple OAuth может завершиться `origin_mismatch`; текущая проверка такого входа не подтверждена.
+
 **Компоненты:**
 
-- **Gateway** (`gateway/gateway.js`) — Node.js прокси без зависимостей (≈300 строк, читается за 10 минут). Подставляет cookies в запросы **только к `claude.ai`**, переписывает URL ассетов и CSP-заголовки (чтобы SPA работала через прокси), вырезает все заголовки, раскрывающие клиента (`CF-Connecting-IP`, `X-Forwarded-For`, `Forwarded`, `Via`, …) и basic_auth-заголовок, не отдаёт браузеру `Set-Cookie` и не пишет в логи query-строки и cookies.
-- **Caddy** — TLS + basic_auth + маршрутизация. Пути ассетов отдаются без basic_auth (публичные JS/CSS), чтобы не было 401 при динамическом `import()`.
-- **Расширение браузера** (`extension/`, **Chrome/Edge и Firefox**) — прозрачно редиректит `claude.ai` и его ассет-домены на шлюз, добавляет basic_auth-заголовок и **нормализует отпечаток** страницы: часовой пояс → UTC, язык → en-US, геолокация запрещена, WebRTC отключён.
+- **Gateway** (`gateway/gateway.js`) — прокси для фиксированного списка upstream hostnames; хранит cookie-jar на пользователя, удаляет чувствительные заголовки и не отдаёт `Set-Cookie` браузеру. Отдельный TLS CONNECT listener ограничен artifact-доменами и явным списком CDN.
+- **TLS front door + Caddy** — front door принимает публичный TCP 443 и направляет соединения по TLS/CONNECT. Caddy обслуживает HTTPS gateway, HTTP-01 для сертификата IP и HTTP на порту 80. Gateway listeners доступны только внутри Docker-сети.
+- **Расширение браузера** (`extension/`) — основной клиентский вариант Chromium: точный gateway HTTPS-origin используется напрямую, а разрешённые артефакты/CDN идут через TLS CONNECT после проверки gateway. Неизвестные адреса блокируются во всём выделенном профиле. Фактическую совместимость проверяйте для выбранной версии. Firefox сейчас fail-closed для artifact CONNECT; previews не подтверждены. См. [SECURITY.md](SECURITY.md).
 
 ## Структура репозитория
 
 | Путь | Что это |
 |---|---|
 | `gateway/gateway.js` | прокси с подстановкой cookies (Node, без зависимостей) |
-| `server/compose.yaml` | docker-compose: gateway + caddy (с жёсткой изоляцией контейнеров) |
-| `server/Caddyfile.template` | шаблон конфига Caddy (multi-user basic_auth) |
+| `server/compose.yaml` | Docker Compose: TLS front door, gateway и Caddy |
+| `server/Caddyfile.template` | доменный вход, Basic auth, HTTP-01 выпуск IP-сертификата |
 | `server/add-user.sh`, `remove-user.sh` | добавить/сменить пароль/удалить пользователя |
 | `server/backup.sh`, `restore.sh` | зашифрованный бэкап и восстановление |
 | `extension/` | расширение Chrome/Edge и Firefox (Manifest V3), `build.sh` собирает оба пакета |
-| `tests/` | тесты шлюза (`node --test`) и проверка отпечатка в реальном Chrome |
+| `tests/` | unit, integration и браузерные проверки; см. фактический итог конкретного запуска |
 | `SECURITY.md` | модель угроз, что проверено, ограничения |
 | `install.sh` | **поэтапный интерактивный установщик сервера** (рекомендуется) |
 | `configure.sh` | подставляет ваш домен в шаблоны |
 | `docs/DEPLOY-SERVER.md` | подробная настройка сервера |
 | `docs/SETUP-CLIENT.md` | подробная настройка клиента (Mac) |
-| `docs/MULTI-USER.md` | несколько пользователей + расчёт ёмкости |
+| `docs/MULTI-USER.md` | пользователи, изоляция и эксплуатационные ограничения |
 
 ---
 
@@ -103,111 +109,19 @@ git clone <этот-репозиторий> && cd claude_for_browes
 bash install.sh
 ```
 
-Интерактивный установщик проведёт по 9 шагам: проверка окружения → домен → первый пользователь (bcrypt) → генерация конфигов, ключей и `.env` (+ Telegram по желанию) → сборка каталога и расширений → резервные копии (ключ + cron) → проверка DNS → запуск → проверка.
+Интерактивный установщик подготовит доменный адрес и публичный IP, `.env`, отдельный каталог деплоя, расширения, ключи и резервное копирование. Требуются открытые входящие TCP 80 и 443. См. [инструкцию сервера](docs/DEPLOY-SERVER.md) и проверяйте вывод установщика после завершения.
 
-После установки готовые расширения под ваш домен раздаются самим сервером: **`https://<домен>/__ext/`** (за логином/паролем) — отправляйте клиенту эту ссылку, логин и пароль. Руками ничего собирать не нужно.
+После установки готовые расширения раздаются сервером по **`https://<домен>/__ext/`** за Basic auth. Выдайте клиенту ссылку, логин и пароль.
 
-Другие возможности сервера:
-- **Статус** — в попапе расширения («Claude session OK / expired / не выполнен вход»); сводка по всем: `curl -u admin https://<домен>/__admin/status`.
-- **Telegram-алерты** — истёкшая сессия пользователя и бан IP (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` в `.env`).
-- **Защита от подбора пароля**, **шифрование cookies на диске**, **ежедневный бэкап**, **WebSocket**, **сжатие** и **кэш статики** — см. [SECURITY.md](SECURITY.md).
+Есть управление пользователями, просмотр статуса сессий для администраторов, опциональные Telegram-уведомления и зашифрованные резервные копии. Cookies at rest шифруются, когда задан `COOKIES_KEY`; защита и оставшиеся ограничения описаны в [SECURITY.md](SECURITY.md).
 
 Рекомендация по масштабу: **один сервер (один IP) на одного клиента/группу** — так аккаунты разных клиентов не смешиваются под одним IP.
 
-Дальше — «Часть 2. Клиент».
-
-Ниже — ручная установка по шагам (если не используете `install.sh`).
+Дальше — настройка клиентского браузера. Архитектура и требования к серверу описаны в [docs/DEPLOY-SERVER.md](docs/DEPLOY-SERVER.md); установка выполняется через `install.sh`.
 
 ## Часть 1. Сервер
 
-Нужен сервер с публичным IP в регионе, где доступен claude.ai (например DigitalOcean, Amsterdam). Тестировано на Ubuntu + Docker, 1 vCPU / 2GB RAM.
-
-### Шаг 1. Установите Docker
-
-```sh
-curl -fsSL https://get.docker.com | sh
-```
-
-### Шаг 2. Склонируйте репозиторий на сервер
-
-```sh
-git clone git@github.com:JFT-git/claude_for_browes.git /root/claude-browser
-cd /root/claude-browser
-```
-
-### Шаг 3. Подставьте ваш домен
-
-```sh
-./configure.sh claude.example.com
-```
-
-Это заполнит домен в `extension/` и создаст `server/Caddyfile` из шаблона.
-
-### Шаг 4. Задайте basic_auth
-
-Отредактируйте `server/Caddyfile` — замените плейсхолдеры:
-- `__BASIC_AUTH_USER__` — имя пользователя (например `owner`)
-- `__BASIC_AUTH_HASH__` — хэш пароля. Сгенерируйте:
-
-```sh
-docker run --rm caddy:2 caddy hash-password --plaintext 'ваш-пароль'
-```
-
-Вставьте результат вместо `__BASIC_AUTH_HASH__`.
-
-### Шаг 5. Разложите файлы по местам
-
-На сервере должна получиться такая структура:
-
-```
-/root/claude-browser/
-├── compose.yaml              ← из server/compose.yaml
-├── Caddyfile                 ← сгенерирован и отредактирован (шаг 3-4)
-└── gateway/
-    ├── src/gateway.js        ← из gateway/gateway.js
-    └── cookies/              ← сюда попадут session-cookies (по файлу на пользователя)
-```
-
-```sh
-cp server/compose.yaml ./compose.yaml
-mkdir -p gateway/src gateway/cookies
-cp gateway/gateway.js gateway/src/gateway.js
-```
-
-### Шаг 6. DNS / Cloudflare
-
-Направьте `claude.example.com` на IP сервера.
-
-**Рекомендуется Cloudflare** (скрывает origin и сглаживает обрывы соединения на уровне провайдера):
-1. Добавьте запись A: `claude` → IP сервера
-2. Включите **Proxied** (оранжевое облако)
-3. SSL/TLS → режим **Full**
-
-### Шаг 7. Запустите
-
-```sh
-cd /root/claude-browser
-docker compose up -d
-```
-
-Поднимутся два контейнера: `gateway` и `caddy`.
-
-### Шаг 8. Добавьте пользователей
-
-```sh
-./add-user.sh alice            # пароль сгенерируется и покажется один раз
-./add-user.sh alice 'свой-пароль-12+'  # или задайте свой / смените существующий
-./remove-user.sh alice
-```
-
-Пользователь логинится в Claude **сам**, через шлюз (magic-link), — шлюз перехватывает его session-cookies в `gateway/cookies/<user>.json` и никогда не отдаёт их браузеру. Удалённый браузер не нужен.
-
-### Шаг 9. Проверьте
-
-```sh
-curl -s -u owner:ваш-пароль https://claude.example.com/__health
-# → {"ok":true,"users":0}
-```
+Серверный гайд описывает TLS front door, Caddy, gateway, `PUBLIC_HOST`, `CONNECT_HOST`, HTTP-01 и сертификат IP. Он не заменяет установщик. Не запускайте старую двухконтейнерную схему из инструкций предыдущих версий.
 
 ---
 
@@ -217,59 +131,37 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 
 ### Что выдать клиенту
 
-- Папку `extension/dist/chrome` (Chrome/Edge) или `extension/dist/firefox` (Firefox) — собирается командой `./configure.sh <домен>` (уже настроено под ваш домен)
-- Или скачайте готовое расширение с `https://<домен>/__ext/` (за логином/паролем) — одна сборка на все домены
+- Текущую Chromium-сборку либо готовый пакет с `https://<домен>/__ext/` за логином/паролем
 - Gateway host (например `claude.example.com`)
 - Его basic_auth **user** и **password**
 
 ### Шаг 1. Создайте отдельный профиль браузера
 
-1. Chrome → значок профиля (правый верх) → **Добавить**
-2. Назовите, например, «Claude»
-3. **Не** входите в Google-аккаунт в этом профиле
+1. Создайте отдельный профиль и используйте его только для этого расширения.
+2. Пока расширение активно, оно ограничивает сетевые запросы этого профиля: неизвестные внешние адреса, открытые из Claude, блокируются; WebRTC privacy policy также относится ко всему профилю.
+3. Не используйте защищаемый профиль для обычного веб-сёрфинга или других приложений.
 
-### Готовые сборки (без компиляции)
-
-В папке [`releases/`](releases/) лежат готовые пакеты расширения для Chrome и Firefox (+ `SHA256SUMS`). Они **не привязаны к домену** — превратите их в рабочую папку под ваш шлюз одной командой:
-
-```sh
-./releases/configure-prebuilt.sh chrome  claude.example.com   # -> releases/claude-gateway-chrome/
-./releases/configure-prebuilt.sh firefox claude.example.com   # -> releases/claude-gateway-firefox/
-```
-
-Это то же самое, что собрать из исходников (`./configure.sh`), — содержимое можно сверить с `extension/` и контрольными суммами. Пересобрать релиз: `extension/release.sh` на чистой копии репозитория.
+Не используйте пакеты из `releases/` с версией 1.8.14: они предшествуют защищённому CONNECT-маршруту. Используйте Chromium-сборку версии 2.0.3 или новее и Chrome 125+; Firefox 140+ остаётся fail-closed для artifact CONNECT.
 
 ### Шаг 2. Установите расширение
 
-**Chrome / Edge:** `chrome://extensions` → **Режим разработчика** → **Загрузить распакованное** → папка `extension/dist/chrome`.
-После загрузки откройте **Настройки** расширения, введите домен шлюза и нажмите «Сохранить и разрешить». Браузер запросит доступ к домену — подтвердите.
+**Chrome / Edge:** `chrome://extensions` → **Режим разработчика** → **Загрузить распакованное**. Для исходников выберите `extension/dist/chrome`; если получили zip с сервера, распакуйте его и выберите папку, где лежит `manifest.json`.
+После загрузки откройте **Настройки** расширения, введите домен шлюза и нажмите «Сохранить и разрешить». Браузер запросит доступ к нужным адресам — подтвердите.
 
-**Firefox (≥ 128):** `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → `extension/dist/firefox/manifest.json`. Временное дополнение снимается при перезапуске Firefox; для постоянной установки подпишите пакет `extension/dist/claude-gateway-firefox.zip` на [addons.mozilla.org](https://addons.mozilla.org/developers/) (unlisted) — или используйте Firefox Developer/Nightly с `xpinstall.signatures.required=false`.
-После загрузки откройте **Настройки** расширения, введите домен шлюза и нажмите «Сохранить и разрешить».
+Firefox manifest требует ≥ 140, но Firefox не поддерживается для полной работы: artifact CONNECT намеренно fail-closed до проверки безопасного lifecycle.
+В настройках укажите Gateway host, свой gateway user и password. Chromium-сборке требуется разрешение `debugger`; Chrome показывает предупреждение об этом при установке. Оно нужно для ограниченной обработки ответов артефактов. При подключённой вкладке шлюза будет виден системный баннер отладки. После обновления расширения перезагрузите его на странице extensions и сделайте hard reload страницы Claude.
 
-Откройте **Settings** расширения и введите:
-- **Gateway host:** например `claude.example.com`
-- **User / Password:** basic_auth-креды клиента
+### Шаг 3. Проверьте защиту
 
-### Шаг 3. Чистый отпечаток — делает расширение
-
-На странице Claude расширение автоматически подставляет:
-
-| Что | Значение |
-|---|---|
-| Часовой пояс (`Date`, `Intl`, `toLocale*`) | **UTC** |
-| Язык (`navigator.language(s)`, `Intl`-локаль, `Accept-Language`) | **en-US** |
-| Геолокация | запрещена |
-| WebRTC (`RTCPeerConnection`) | отключён — не утечёт локальный/реальный IP |
-
-Ограничения (честно): не покрываются Web/Service Workers; расширение не скрывает ваш IP (это делает шлюз) и не меняет железные признаки (экран, шрифты, GPU). Подробнее — [SECURITY.md](SECURITY.md).
+В настройках и popup расширения убедитесь, что отображается активный защищённый маршрут. Если маршрут не готов, неизвестные внешние запросы останутся заблокированными. Не считайте fingerprint включённым, пока расширение явно не подтвердило его регистрацию. Режим WebRTC меняет настройки всего выделенного профиля.
 
 ### Шаг 4. Пользуйтесь Claude
 
 Откройте `https://claude.ai` в этом профиле. Он загрузится через шлюз с уже авторизованной сессией.
 
-- Печатайте по-русски, вставляйте текст/ссылки, перетаскивайте файлы — всё нативно, без лагов
-- Claude видит IP сервера, не ваш
+- Claude работает в браузере клиента; поддерживаемые артефакты могут открываться через отдельный CONNECT tunnel.
+- В Chromium подходящие artifact responses обрабатываются только в точном профиле/вкладках gateway: расширение добавляет gateway origin в `frame-ancestors`, сохраняя остальные CSP-политики. Совместимость реального preview зависит от страницы и пока не гарантируется; DevTools может занять debugger и привести к fail-closed блокировке артефакта.
+- Inline artifact response, для которого нужно менять заголовки, ограничен буфером 8 MiB; attachment-загрузки проходят по штатному download-пути браузера без буферизации этим механизмом. Успешная работа каждого типа артефакта, загрузки и OAuth не гарантирована; известные ограничения перечислены в [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -280,7 +172,7 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 | Зацикленное окно логина браузера | Заново введите креды в Options расширения, затем обновите расширение (⟳ на `chrome://extensions`) |
 | Claude просит логин | Сессия протухла — просто залогиньтесь снова через шлюз (magic-link), cookies перехватятся автоматически |
 | Шрифты сломаны | Hard reload: ⌘+Shift+R |
-| Страница частично грузится / таймауты | Сеть клиента обрывает соединение — попробуйте другую сеть или убедитесь, что настроен Cloudflare (Часть 1, шаг 6) |
+| Артефакт или внешний компонент заблокирован | Адрес не входит в проверенный allowlist. Не добавляйте произвольные домены; проверьте текущую совместимость и журнал релиза. |
 | 401 на `/v1/code/*` или ассетах | Убедитесь, что gateway обновлён (удаляет `authorization` перед форвардингом) |
 
 ---
@@ -302,7 +194,7 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 
 Добавить пользователя: `./server/add-user.sh <имя> <пароль>`
 
-**Подробно + расчёт ёмкости сервера: [docs/MULTI-USER.md](docs/MULTI-USER.md)**
+**Архитектура пользователей и ограничения: [docs/MULTI-USER.md](docs/MULTI-USER.md)**
 
 ---
 
@@ -310,10 +202,13 @@ curl -s -u owner:ваш-пароль https://claude.example.com/__health
 
 Весь код открыт — проверьте сами: `gateway/gateway.js` (прокси), `extension/` (расширение), `server/` (Caddy + docker). Подробный разбор — **[SECURITY.md](SECURITY.md)**. Коротко:
 
-- Session-cookies живут только на сервере (`gateway/cookies/*.json`, права 600, в `.gitignore`) и уходят только на `claude.ai`.
-- Шлюз вырезает заголовки, раскрывающие клиента, и не логирует cookies, query-строки и тела запросов.
-- Контейнеры: `cap_drop: ALL`, `no-new-privileges`, read-only FS у шлюза, порты наружу — только 80/443 у Caddy.
-- Тесты: `npm test` (шлюз), `npm run test:fingerprint` (реальный Chrome с TZ=Europe/Moscow), CI на GitHub.
+- Cookies хранятся на сервере; at-rest encryption зависит от заданного `COOKIES_KEY`.
+- Отдельный proxy token применяется только к разрешённым artifact/CDN-доменам. После успешного mint новый токен отзывает только точный previous bearer token, который прислал этот клиент, даже при смене аккаунта; ошибка выдачи нового токена не отзывает действующий. Если затем не проходит проверка маршрута, маршрутизация остаётся закрытой, а выданный кандидат сохраняется для retry. До открытия artifact routes расширение делает фиксированный HTTPS HEAD без тела через защищённый CONNECT.
+- Default runtime logger Caddy удаляет request URI и headers, включая query/cookies/auth headers; диагностические сообщения и логи других компонентов отдельно не очищаются. При обновлении Caddyfile пересоздайте контейнер Caddy.
+- Входящие порты: TCP 80 для HTTP-01 и TCP 443 для front door. Gateway 8088/8443 остаются внутренними.
+- Firefox artifact routing fail-closed; OAuth origin mismatch и CSP-ограничения артефактов остаются известными ограничениями.
+- Для 2.0.3 прошли 132 Node.js и 21 Python-тест без пропусков, Firefox lint без замечаний и Chromium native gate 12/12 в синтетической fixture. Синтетические PDF/code attachments сохранили исходные байты, а следующий preview открылся в той же вкладке; это не проверка реальных owner/public PDF или code downloads. Выбранные owner HTML/React/SVG/Mermaid/Markdown/TXT сценарии и 4/5 cold thumbnails относятся к private SSH fixture версии 2.0.2; положительный публичный Basic-auth E2E не выполнялся. Пятый thumbnail совпал с upstream 404. Подробности и непроверенные сценарии — в [SECURITY.md](SECURITY.md).
+- Не считайте выборочную проверку гарантией поддержки всех артефактов или публичного production deployment.
 
 ---
 

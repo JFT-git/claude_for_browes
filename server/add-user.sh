@@ -1,59 +1,31 @@
 #!/bin/sh
-# Add a user (or reset an existing user's password).
-# Run on the server from the project dir (where Caddyfile lives).
-# Usage: ./add-user.sh <username> [password]
-#   no password given -> a strong random one is generated and printed ONCE.
-set -e
-
-USER="$1"
-PASS="$2"
-
-if [ -z "$USER" ]; then
-  echo "Usage: ./add-user.sh <username> [password]"
-  exit 1
-fi
-if ! echo "$USER" | grep -qE '^[a-zA-Z0-9._-]+$' || [ "${#USER}" -gt 64 ]; then
-  echo "Error: username may only contain letters, digits, dot, dash, underscore (max 64)"
-  exit 1
-fi
-[ -f Caddyfile ] || { echo "Error: Caddyfile not found in current directory. Run from the project dir."; exit 1; }
-
+# Add a user or reset a password. Run from the deployment directory.
+set -eu
+. "$(dirname "$0")/install-lib.sh"
+USERNAME=${1:-}
+PASSWORD=${2:-}
+valid_user "$USERNAME" || { echo 'Error: username needs 1–64 ASCII letters, digits, dots, dashes or underscores; . and .. are invalid.' >&2; exit 1; }
+[ -f Caddyfile ] || { echo 'Error: run from the deployment directory (Caddyfile missing).' >&2; exit 1; }
 GENERATED=0
-if [ -z "$PASS" ]; then
-  PASS=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
-  GENERATED=1
-fi
-if [ "${#PASS}" -lt 12 ]; then
-  echo "Error: password must be at least 12 characters (or omit it to generate one)"
-  exit 1
-fi
-
-HASH=$(docker run --rm caddy:2 caddy hash-password --plaintext "$PASS" 2>/dev/null | tail -1)
-[ -n "$HASH" ] || { echo "Error: failed to generate hash (is docker running?)"; exit 1; }
-
-# drop an existing line for this user, then insert the new one after the marker
-# (awk + ENVIRON: no shell/sed escaping problems with the '$' characters in bcrypt hashes)
-U="$USER" H="$HASH" awk '
-  $1 == ENVIRON["U"] && $2 ~ /^\$2/ { next }
-  { print }
-  /# one line per user/ { printf "            %s %s\n", ENVIRON["U"], ENVIRON["H"] }
-' Caddyfile > Caddyfile.new
-grep -q "^ *$USER " Caddyfile.new || { rm -f Caddyfile.new; echo "Error: marker '# one line per user' not found in Caddyfile"; exit 1; }
-mv Caddyfile.new Caddyfile
-
+if [ -z "$PASSWORD" ]; then PASSWORD=$(openssl rand -hex 12); GENERATED=1; fi
+[ "${#PASSWORD}" -ge 12 ] || { echo 'Error: password must be at least 12 characters.' >&2; exit 1; }
+HASH=$(hash_password "$PASSWORD")
+CANDIDATE=$(mktemp "$(pwd)/.Caddyfile.XXXXXX")
+trap 'rm -f "$CANDIDATE"' EXIT HUP INT TERM
+U="$USERNAME" H="$HASH" awk '
+  /^[[:space:]]*basic_auth([[:space:]]|\{)/ {auth=1; print; print "            " ENVIRON["U"] " " ENVIRON["H"]; inserted=1;next}
+  auth && /^[[:space:]]*}/ {auth=0}
+  auth && $1 == ENVIRON["U"] && $2 ~ /^\$2/ {next}
+  {print}
+  END {if (!inserted) exit 1}' Caddyfile > "$CANDIDATE"
+validate_caddy "$CANDIDATE" "$(env_get .env CONNECT_HOST)" "$(env_get .env FRONTDOOR_IP)"
+chmod 600 "$CANDIDATE"
+mv "$CANDIDATE" Caddyfile
+umask 077
 mkdir -p gateway/cookies
-[ -f "gateway/cookies/$USER.json" ] || echo '{"cookies":[]}' > "gateway/cookies/$USER.json"
-chmod 600 "gateway/cookies/$USER.json" 2>/dev/null || true
-
-docker compose restart caddy >/dev/null 2>&1 || true
-
-echo "User ready: $USER"
-if [ "$GENERATED" = "1" ]; then
-  echo "  password (shown once): $PASS"
-else
-  echo "  password: (the one you provided)"
-fi
-echo "  cookie slot: gateway/cookies/$USER.json"
-echo ""
-echo "Send the user: extension download page https://<domain>/__ext/ , their login and password."
-echo "They sign in to Claude through the gateway (or import a session) — see docs/SETUP-CLIENT.md."
+chmod 700 gateway/cookies
+[ -f "gateway/cookies/$USERNAME.json" ] || printf '%s\n' '{"cookies":[]}' > "gateway/cookies/$USERNAME.json"
+chmod 600 "gateway/cookies/$USERNAME.json"
+docker compose restart caddy
+printf 'User ready: %s\n' "$USERNAME"
+if [ "$GENERATED" = 1 ]; then printf 'Password (shown once): %s\n' "$PASSWORD"; fi

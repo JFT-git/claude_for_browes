@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gateway Connector for Claude",
-  "version": "1.8.14",
+  "version": "2.0.3",
   "description": "Routes claude.ai through your gateway. Enter your gateway host once \u2014 one build for all domains.",
   "permissions": [
     "declarativeNetRequest",
@@ -9,10 +9,13 @@
     "scripting",
     "proxy",
     "webRequest",
-    "webRequestAuthProvider"
+    "privacy",
+    "alarms",
+    "webRequestBlocking"
   ],
   "background": {
     "scripts": [
+      "privacy-rules.js",
       "background.js"
     ]
   },
@@ -31,16 +34,50 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "{3f7a9c2e-8b4d-4e1a-9c5f-2d6b8a4e7f1c}",
-      "strict_min_version": "128.0",
+      "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [
           "none"
         ]
       },
       "update_url": "https://raw.githubusercontent.com/JFT-git/claude_for_browes/main/updates.json"
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
     }
   },
   "optional_permissions": [
     "https://*/*"
-  ]
+  ],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://www.claude.ai/*",
+    "https://assets.claude.ai/*",
+    "https://assets-proxy.anthropic.com/*",
+    "https://api.anthropic.com/*",
+    "https://s-cdn.anthropic.com/*",
+    "https://a-cdn.anthropic.com/*",
+    "https://a.claude.ai/*",
+    "https://a-cdn.claude.ai/*",
+    "https://*.claudeusercontent.com/*",
+    "https://*.claudemcpcontent.com/*",
+    "https://cdn.jsdelivr.net/*",
+    "https://cdnjs.cloudflare.com/*",
+    "https://unpkg.com/*",
+    "https://fonts.googleapis.com/*",
+    "https://fonts.gstatic.com/*",
+    "https://esm.sh/*",
+    "https://cdn.tailwindcss.com/*",
+    "https://code.jquery.com/*",
+    "https://cdn.plot.ly/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "proxy_blocks",
+        "enabled": true,
+        "path": "proxy-block-rules.json"
+      }
+    ]
+  }
 }

@@ -1,0 +1,70 @@
+[
+  {
+    "id": 1,
+    "priority": 100,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^(?:https?|wss?)://",
+      "excludedResourceTypes": [],
+      "requestDomains": [
+        "claudeusercontent.com",
+        "claudemcpcontent.com",
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com",
+        "unpkg.com",
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "esm.sh",
+        "claude.ai",
+        "www.claude.ai",
+        "assets.claude.ai",
+        "assets-proxy.anthropic.com",
+        "api.anthropic.com",
+        "s-cdn.anthropic.com",
+        "a-cdn.anthropic.com",
+        "a.claude.ai",
+        "a-cdn.claude.ai",
+        "cdn.tailwindcss.com",
+        "code.jquery.com",
+        "cdn.plot.ly"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 100,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^(?:https?|wss?)://",
+      "resourceTypes": [
+        "main_frame"
+      ],
+      "requestDomains": [
+        "claudeusercontent.com",
+        "claudemcpcontent.com",
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com",
+        "unpkg.com",
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "esm.sh",
+        "claude.ai",
+        "www.claude.ai",
+        "assets.claude.ai",
+        "assets-proxy.anthropic.com",
+        "api.anthropic.com",
+        "s-cdn.anthropic.com",
+        "a-cdn.anthropic.com",
+        "a.claude.ai",
+        "a-cdn.claude.ai",
+        "cdn.tailwindcss.com",
+        "code.jquery.com",
+        "cdn.plot.ly"
+      ]
+    }
+  }
+]

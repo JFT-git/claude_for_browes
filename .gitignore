@@ -6,6 +6,12 @@ cookies/
 *.pem
 *.key
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.*.sample
+backups/
 
 # OS
 .DS_Store
@@ -18,3 +24,7 @@ node_modules/
 __pycache__/
 *.pyc
 dist/
+
+# Browser test output (may contain session data)
+test-results/
+playwright-report/

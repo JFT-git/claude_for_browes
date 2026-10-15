@@ -1,213 +1,141 @@
 #!/usr/bin/env bash
-#
-# install.sh — поэтапная установка сервера claude_for_browes.
-#
-# Запуск на сервере (Ubuntu/Debian, root или sudo):
-#   git clone <repo> && cd claude_for_browes && bash install.sh
-#
-# Скрипт интерактивный: на каждом шаге объясняет, что делает, и спрашивает
-# подтверждение. Можно прервать Ctrl+C и запустить заново — шаги идемпотентны.
-#
+# Interactive installation and safe upgrades. Run on the deployment server.
 set -euo pipefail
-
-# ---------------------------------------------------------------- оформление --
-if [ -t 1 ]; then
-  B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; C=$'\033[36m'; N=$'\033[0m'
-else
-  B=""; G=""; Y=""; R=""; C=""; N=""
-fi
-step() { echo; echo "${B}${C}═══ Шаг $1/$TOTAL · $2${N}"; }
-ok()   { echo "${G}✔${N} $*"; }
-warn() { echo "${Y}!${N} $*"; }
-err()  { echo "${R}✖ $*${N}" >&2; }
-die()  { err "$*"; exit 1; }
-ask()  { # ask <var> <prompt> [default]
-  local v="$1" p="$2" d="${3:-}"
-  if [ -n "$d" ]; then read -r -p "${B}$p${N} [$d]: " "$v" || true; eval "$v=\${$v:-$d}";
-  else read -r -p "${B}$p${N}: " "$v" || true; fi
-}
-ask_secret() { local v="$1" p="$2"; read -r -s -p "${B}$p${N}: " "$v" || true; echo; }
-confirm() { local a; read -r -p "${B}$1${N} [Y/n]: " a || true; case "${a:-Y}" in [Yy]*) return 0;; *) return 1;; esac; }
-
-TOTAL=9
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
+. ./server/install-lib.sh
+ok() { printf '✔ %s\n' "$*"; }
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+ask() {
+  local name="$1" prompt="$2" default="${3:-}" answer=''
+  read -r -p "$prompt${default:+ [$default]}: " answer || true
+  printf -v "$name" '%s' "${answer:-$default}"
+}
+ask_secret() { local name="$1" prompt="$2" answer=''; read -r -s -p "$prompt: " answer || true; echo; printf -v "$name" '%s' "$answer"; }
+confirm() { local answer=''; read -r -p "$1 [Y/n]: " answer || true; case "${answer:-Y}" in [Yy]*) return 0;; *) return 1;; esac; }
+for dependency in docker curl openssl zip awk; do command -v "$dependency" >/dev/null || die "$dependency is required"; done
+docker compose version >/dev/null
+docker info >/dev/null
 
-echo "${B}Установка claude_for_browes — сервер шлюза Claude${N}"
-echo "Репозиторий: $REPO_DIR"
-
-# ------------------------------------------------- Шаг 1: проверка окружения --
-step 1 "Проверка окружения"
-[ "$(id -u)" = "0" ] || warn "Не root. Команды docker должны работать без sudo, иначе будут ошибки."
-command -v docker >/dev/null 2>&1 || die "docker не найден. Установите: https://docs.docker.com/engine/install/"
-docker compose version >/dev/null 2>&1 || die "docker compose plugin не найден."
-command -v curl >/dev/null 2>&1 || die "curl не найден."
-command -v openssl >/dev/null 2>&1 || die "openssl не найден (нужен для ключей и бэкапов)."
-if ! command -v zip >/dev/null 2>&1; then
-  warn "zip не найден — нужен для сборки расширения."
-  if command -v apt-get >/dev/null 2>&1 && confirm "Установить zip через apt?"; then apt-get install -y zip >/dev/null; fi
-  command -v zip >/dev/null 2>&1 || die "Установите zip и запустите install.sh снова."
+# Select the destination before reading or generating any secrets.
+ask DEPLOY_DIR 'Куда установить сервер' '/root/claude-browser'
+[[ "$DEPLOY_DIR" = /* ]] || die 'Deployment directory must be an absolute path.'
+# Cron commands are shell syntax; restrict paths to safe literal pathname characters.
+[[ "$DEPLOY_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || die 'Deployment path may contain only ASCII letters, digits, /, ., _, -.'
+[ ! -L "$DEPLOY_DIR/.env" ] || die 'Refusing a symlinked .env.'
+ENV_FILE="$DEPLOY_DIR/.env"
+COOKIES_KEY=$(env_get "$ENV_FILE" COOKIES_KEY)
+if [ -z "$COOKIES_KEY" ] && [ -d "$DEPLOY_DIR/gateway/cookies" ]; then
+  COOKIE_SCAN_STATUS=0
+  # Consume the full scan: an early-closing grep -q can hide matches via SIGPIPE.
+  COOKIE_SCAN=$(grep -r -lE --include='*.json' '"enc"[[:space:]]*:[[:space:]]*1([,}[:space:]]|$)' "$DEPLOY_DIR/gateway/cookies" 2>/dev/null) || COOKIE_SCAN_STATUS=$?
+  [ "$COOKIE_SCAN_STATUS" -le 1 ] || die 'Cannot inspect existing cookie jars; no files were changed.'
+  [ -z "$COOKIE_SCAN" ] || die 'Encrypted cookie jars exist but COOKIES_KEY is missing. Restore the original key; no files were changed.'
 fi
-ok "docker $(docker --version | grep -oE '[0-9.]+' | head -1), compose, curl — на месте"
-docker info >/dev/null 2>&1 || die "docker daemon не отвечает (нужны права root или группа docker)."
-ok "docker daemon работает"
+if [ -n "$COOKIES_KEY" ]; then
+  if [[ ! "$COOKIES_KEY" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    [[ "$COOKIES_KEY" =~ ^[A-Za-z0-9+/_-]{43}=?$ ]] || die 'Existing COOKIES_KEY is invalid; restore the original 32-byte key.'
+    KEY_FOR_DECODE=$(printf '%s' "$COOKIES_KEY" | tr '_-' '/+')
+    [ "${#KEY_FOR_DECODE}" = 44 ] || KEY_FOR_DECODE="$KEY_FOR_DECODE="
+    [ "$(printf '%s' "$KEY_FOR_DECODE" | openssl base64 -d -A | wc -c | tr -d ' ')" = 32 ] || die 'Existing COOKIES_KEY is invalid; restore the original 32-byte key.'
+    unset KEY_FOR_DECODE
+  fi
+fi
+ask DOMAIN 'Публичный домен шлюза' "$(env_get "$ENV_FILE" PUBLIC_HOST)"
+valid_domain "$DOMAIN" || die 'Invalid gateway domain.'
+ask CONNECT_IP 'Публичный IPv4 сервера для HTTPS CONNECT' "$(env_get "$ENV_FILE" CONNECT_HOST)"
+valid_public_ipv4 "$CONNECT_IP" || die 'CONNECT_HOST must be a public IPv4 address.'
+FRONTDOOR_ADDRESS=$(env_get "$ENV_FILE" FRONTDOOR_IP)
+FRONTDOOR_ADDRESS=${FRONTDOOR_ADDRESS:-172.30.240.2}
 
-# ------------------------------------------------------- Шаг 2: домен шлюза --
-step 2 "Домен шлюза"
-echo "Это публичный адрес, по которому клиенты будут открывать Claude."
-echo "DNS-запись должна указывать на IP этого сервера (A-запись)."
-ask DOMAIN "Домен шлюза (например claude.example.com)" "${DOMAIN:-}"
-[ -n "$DOMAIN" ] || die "Домен обязателен."
-echo "$DOMAIN" | grep -qE '^[a-z0-9.-]+\.[a-z]{2,}$' || die "Некорректный домен: $DOMAIN"
-ok "Домен: $DOMAIN"
-
-# ------------------------------------------- Шаг 3: первый пользователь ------
-step 3 "Первый пользователь (basic_auth)"
-echo "Логин/пароль для доступа к шлюзу (это НЕ аккаунт Claude — а доступ к вашему шлюзу)."
-echo "Пароль хранится только в виде bcrypt-хэша в Caddyfile. Минимум 12 символов."
-ask ADMIN_USER "Имя пользователя" "owner"
-echo "$ADMIN_USER" | grep -qE '^[a-zA-Z0-9._-]+$' || die "Имя: только буквы, цифры, точка, дефис, подчёркивание."
-while :; do
-  ask_secret ADMIN_PASS "Пароль для $ADMIN_USER"
-  [ "${#ADMIN_PASS}" -ge 12 ] || { warn "Слишком короткий пароль (минимум 12 символов) — повторите."; continue; }
-  ask_secret ADMIN_PASS2 "Повторите пароль"
-  [ "$ADMIN_PASS" = "$ADMIN_PASS2" ] && break
-  warn "Пароли не совпадают — повторите."
-done
-ok "Пользователь: $ADMIN_USER"
-
-# ------------------------------------------- Шаг 4: генерация конфигов -------
-step 4 "Генерация конфигов под домен"
-echo "Заполняю шаблоны (extension, Caddyfile, compose) вашим доменом."
-bash ./configure.sh "$DOMAIN"
-[ -f server/Caddyfile ] || die "server/Caddyfile не создан."
-HASH=$(docker run --rm caddy:2 caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -1)
-[ -n "$HASH" ] || die "Не удалось сгенерировать bcrypt-хэш."
-# подставляем user+hash вместо плейсхолдеров
-sed -i.bak "s/__BASIC_AUTH_USER__ __BASIC_AUTH_HASH__/$ADMIN_USER ${HASH//\//\\/}/" server/Caddyfile && rm server/Caddyfile.bak
-grep -q "__BASIC_AUTH" server/Caddyfile && die "Плейсхолдеры basic_auth не заменены."
-ok "Caddyfile настроен, хэш сгенерирован"
-unset ADMIN_PASS ADMIN_PASS2
-
-echo
-echo "Секреты и уведомления (хранятся в .env на сервере, не в репозитории)."
-COOKIES_KEY=$(openssl rand -hex 32)
-ok "Сгенерирован ключ шифрования cookies на диске (AES-256-GCM)"
-echo "Telegram-алерты (истёкшая сессия пользователя, блокировка IP) — необязательно."
-echo "Создайте бота у @BotFather, узнайте chat id у @userinfobot. Пустой ввод — пропустить."
-ask TG_TOKEN "TELEGRAM_BOT_TOKEN" ""
-TG_CHAT=""
-[ -z "$TG_TOKEN" ] || ask TG_CHAT "TELEGRAM_CHAT_ID" ""
-
-# ------------------------------------------- Шаг 5: сборка каталога деплоя ---
-step 5 "Сборка каталога деплоя"
-ask DEPLOY_DIR "Куда установить сервер" "/root/claude-browser"
-mkdir -p "$DEPLOY_DIR/gateway/src" "$DEPLOY_DIR/gateway/cookies"
-cp server/compose.yaml "$DEPLOY_DIR/compose.yaml"
-cp server/Caddyfile   "$DEPLOY_DIR/Caddyfile"
-cp gateway/gateway.js "$DEPLOY_DIR/gateway/src/gateway.js"
-cp server/add-user.sh server/remove-user.sh server/backup.sh server/restore.sh "$DEPLOY_DIR/"
-chmod +x "$DEPLOY_DIR"/*.sh
-mkdir -p "$DEPLOY_DIR/extension"
-cp extension/dist/claude-gateway-chrome.zip extension/dist/claude-gateway-firefox.zip "$DEPLOY_DIR/extension/" \
-  || die "Не найдены собранные расширения (extension/dist/*.zip)."
-ok "Расширения (Chrome, Firefox) под $DOMAIN будут доступны пользователям на https://$DOMAIN/__ext/"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/claude-install.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+caddy_users "$DEPLOY_DIR/Caddyfile" > "$TMP/users"
+if [ -f "$DEPLOY_DIR/Caddyfile" ] && [ ! -s "$TMP/users" ]; then
+  die 'Existing Caddyfile has no recognizable bcrypt users; refusing to discard its authentication.'
+fi
+if [ -s "$TMP/users" ]; then
+  while read -r existing_user existing_hash; do valid_user "$existing_user" || die 'Existing Caddyfile contains an invalid username.'; done < "$TMP/users"
+  ADMIN_USER=$(awk 'NR==1 {print $1}' "$TMP/users")
+  ok 'Существующие пользователи и хэши паролей сохранены'
+else
+  ask ADMIN_USER 'Имя первого пользователя' owner
+  valid_user "$ADMIN_USER" || die 'Invalid username (1–64 ASCII letters, digits, dot, dash, underscore; excluding . and ..).'
+  while :; do
+    ask_secret ADMIN_PASS "Пароль для $ADMIN_USER (минимум 12 символов)"
+    [ "${#ADMIN_PASS}" -ge 12 ] || { echo 'Пароль слишком короткий.'; continue; }
+    ask_secret ADMIN_PASS2 'Повторите пароль'
+    [ "$ADMIN_PASS" = "$ADMIN_PASS2" ] && break
+    echo 'Пароли не совпадают.'
+  done
+  HASH=$(hash_password "$ADMIN_PASS")
+  printf '%s %s\n' "$ADMIN_USER" "$HASH" > "$TMP/users"
+  unset ADMIN_PASS ADMIN_PASS2
+fi
+[ -n "$COOKIES_KEY" ] || COOKIES_KEY=$(openssl rand -hex 32)
+TG_TOKEN=''; TG_CHAT=''
+if ! env_has "$ENV_FILE" TELEGRAM_BOT_TOKEN; then
+  ask_secret TG_TOKEN 'TELEGRAM_BOT_TOKEN (необязательно; Enter — пропустить)'
+  [[ "$TG_TOKEN" =~ ^[a-zA-Z0-9:_-]*$ ]] || die 'Invalid Telegram token.'
+  if [ -n "$TG_TOKEN" ]; then
+    ask TG_CHAT TELEGRAM_CHAT_ID
+    [[ "$TG_CHAT" =~ ^-?[0-9]+$ ]] || die 'Invalid Telegram chat ID.'
+  fi
+fi
+render_caddy "$DOMAIN" "$TMP/users" server/Caddyfile.template "$TMP/Caddyfile"
+validate_caddy "$TMP/Caddyfile" "$CONNECT_IP" "$FRONTDOOR_ADDRESS"
+# Preserve all existing settings as inert dotenv text, replacing only addresses.
 umask 077
-{
-  echo "PUBLIC_HOST=$DOMAIN"
-  echo "COOKIES_KEY=$COOKIES_KEY"
-  echo "ADMIN_USERS=$ADMIN_USER"
-  echo "TELEGRAM_BOT_TOKEN=$TG_TOKEN"
-  echo "TELEGRAM_CHAT_ID=$TG_CHAT"
-} > "$DEPLOY_DIR/.env"
-umask 022
-chmod 600 "$DEPLOY_DIR/.env"
-ok ".env записан (права 600)"
-chmod 700 "$DEPLOY_DIR/gateway/cookies"
-[ -f "$DEPLOY_DIR/gateway/cookies/$ADMIN_USER.json" ] || echo '{"cookies":[]}' > "$DEPLOY_DIR/gateway/cookies/$ADMIN_USER.json"
-chmod 600 "$DEPLOY_DIR/gateway/cookies/$ADMIN_USER.json"
-ok "Файлы в $DEPLOY_DIR"
-
-# ------------------------------------------- Шаг 6: резервные копии ----------
-step 6 "Резервные копии"
-echo "Ежедневный зашифрованный бэкап: сессии пользователей, Caddyfile, .env (хранится 14 копий)."
-BACKUP_KEY_FILE="${BACKUP_KEY_FILE:-/root/.claude-gateway-backup.key}"
-if [ ! -f "$BACKUP_KEY_FILE" ]; then
-  ( umask 077; openssl rand -hex 32 > "$BACKUP_KEY_FILE" )
-  ok "Ключ бэкапа создан: $BACKUP_KEY_FILE"
+if [ -f "$ENV_FILE" ]; then
+  awk '{line=$0;sub(/^[ \t]*(export[ \t]+)?/,"",line);if(line ~ /^(PUBLIC_HOST|CONNECT_HOST)[ \t]*=/) next; print}' "$ENV_FILE" > "$TMP/.env"
+else : > "$TMP/.env"; fi
+printf 'PUBLIC_HOST=%s\nCONNECT_HOST=%s\n' "$DOMAIN" "$CONNECT_IP" >> "$TMP/.env"
+if ! env_has "$ENV_FILE" COOKIES_KEY || [ -z "$(env_get "$ENV_FILE" COOKIES_KEY)" ]; then
+  # Remove an explicitly empty key before appending; dotenv duplicate keys are ambiguous.
+  awk '{line=$0;sub(/^[ \t]*(export[ \t]+)?/,"",line);if(line ~ /^COOKIES_KEY[ \t]*=/) next; print}' "$TMP/.env" > "$TMP/env-next"
+  mv "$TMP/env-next" "$TMP/.env"
+  printf 'COOKIES_KEY=%s\n' "$COOKIES_KEY" >> "$TMP/.env"
 fi
-echo "${Y}ВАЖНО:${N} скопируйте ключ бэкапа в надёжное место ВНЕ сервера. Без него бэкапы не расшифровать:"
-echo "  $(cat "$BACKUP_KEY_FILE")"
-if [ -d /etc/cron.d ] && [ "$(id -u)" = "0" ]; then
-  echo "17 3 * * * root cd $DEPLOY_DIR && ./backup.sh >> backups/backup.log 2>&1" > /etc/cron.d/claude-gateway-backup
-  chmod 644 /etc/cron.d/claude-gateway-backup
-  ok "cron: ежедневно в 03:17 (/etc/cron.d/claude-gateway-backup)"
-else
-  warn "cron не настроен автоматически — запускайте $DEPLOY_DIR/backup.sh вручную или добавьте в crontab."
-fi
-echo "Копия на другой сервер: добавьте BACKUP_REMOTE=user@host:/path в cron-строку (используется scp)."
+env_has "$ENV_FILE" ADMIN_USERS || printf 'ADMIN_USERS=%s\n' "$ADMIN_USER" >> "$TMP/.env"
+env_has "$ENV_FILE" TELEGRAM_BOT_TOKEN || printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TG_TOKEN" >> "$TMP/.env"
+env_has "$ENV_FILE" TELEGRAM_CHAT_ID || printf 'TELEGRAM_CHAT_ID=%s\n' "$TG_CHAT" >> "$TMP/.env"
 
-# ------------------------------------------- Шаг 7: проверка DNS -------------
-step 7 "Проверка DNS"
-PUB_IP=$(curl -s4 --max-time 8 https://api.ipify.org || curl -s4 --max-time 8 https://ifconfig.me || echo "")
-DNS_IP=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1 || true)
-echo "  Публичный IP сервера: ${PUB_IP:-не удалось определить}"
-echo "  $DOMAIN резолвится в: ${DNS_IP:-не резолвится}"
-if [ -n "$PUB_IP" ] && [ -n "$DNS_IP" ] && [ "$PUB_IP" = "$DNS_IP" ]; then
-  ok "DNS указывает на этот сервер"
-elif [ -z "$DNS_IP" ]; then
-  warn "Домен пока не резолвится. Создайте A-запись $DOMAIN -> $PUB_IP (и/или включите Cloudflare Proxied)."
-else
-  warn "DNS ($DNS_IP) != IP сервера ($PUB_IP). Если используете Cloudflare Proxied — это нормально (будет IP Cloudflare)."
-fi
-confirm "Продолжить установку?" || die "Прервано. Настройте DNS и запустите install.sh снова."
+sh ./extension/build.sh
+mkdir -p "$DEPLOY_DIR/gateway/src" "$DEPLOY_DIR/gateway/cookies" "$DEPLOY_DIR/extension" "$DEPLOY_DIR/backups"
+chmod 700 "$DEPLOY_DIR/gateway/cookies" "$DEPLOY_DIR/backups"
+cp server/compose.yaml server/port443-mux.py server/privacy.html "$DEPLOY_DIR/"
+cp gateway/gateway.js "$DEPLOY_DIR/gateway/src/gateway.js"
+cp server/add-user.sh server/remove-user.sh server/install-lib.sh server/backup.sh server/restore.sh "$DEPLOY_DIR/"
+chmod +x "$DEPLOY_DIR"/*.sh
+cp extension/dist/claude-gateway-chrome.zip extension/dist/claude-gateway-firefox.zip "$DEPLOY_DIR/extension/"
+cp "$TMP/.env" "$DEPLOY_DIR/.env"
+cp "$TMP/Caddyfile" "$DEPLOY_DIR/Caddyfile"
+chmod 600 "$DEPLOY_DIR/.env" "$DEPLOY_DIR/Caddyfile"
+while read -r existing_user existing_hash; do
+  cookie_file="$DEPLOY_DIR/gateway/cookies/$existing_user.json"
+  [ -f "$cookie_file" ] || printf '%s\n' '{"cookies":[]}' > "$cookie_file"
+  chmod 600 "$cookie_file"
+done < "$TMP/users"
+ok "Файлы установлены: $DEPLOY_DIR"
 
-# ------------------------------------------- Шаг 8: запуск контейнеров -------
-step 8 "Запуск контейнеров"
+BACKUP_KEY_FILE=${BACKUP_KEY_FILE:-/root/.claude-gateway-backup.key}
+[[ "$BACKUP_KEY_FILE" =~ ^/[a-zA-Z0-9_./-]+$ ]] || die 'Backup key path must be an absolute path without shell metacharacters.'
+if [ ! -f "$BACKUP_KEY_FILE" ]; then openssl rand -hex 32 > "$BACKUP_KEY_FILE"; fi
+chmod 600 "$BACKUP_KEY_FILE"
+ok "Ключ бэкапа: $BACKUP_KEY_FILE — сохраните отдельную копию в надёжном месте"
+CRON_DIR=${CRON_DIR:-/etc/cron.d}
+if [ -d "$CRON_DIR" ] && [ "$(id -u)" = 0 ]; then
+  printf '17 3 * * * root cd %s && BACKUP_KEY_FILE=%s ./backup.sh >> backups/backup.log 2>&1\n' "$DEPLOY_DIR" "$BACKUP_KEY_FILE" > "$CRON_DIR/claude-gateway-backup"
+  chmod 644 "$CRON_DIR/claude-gateway-backup"
+  ok 'Ежедневный зашифрованный бэкап настроен (03:17)'
+else echo 'cron не настроен: добавьте ежедневный запуск backup.sh вручную.'; fi
+
+echo "DNS: домен $DOMAIN должен указывать на сервер; порт 80 должен быть доступен для выдачи IP-сертификата $CONNECT_IP."
+confirm 'Запустить контейнеры?' || { echo 'Файлы готовы; запуск: docker compose up -d из каталога установки.'; exit 0; }
 cd "$DEPLOY_DIR"
-docker compose pull 2>/dev/null || true
+docker compose pull
 docker compose up -d
-ok "Контейнеры запущены"
 docker compose ps
-
-# ------------------------------------------- Шаг 9: проверка -----------------
-step 9 "Проверка"
-sleep 4
-# без пароля ждём 401 (значит TLS + basic_auth на месте)
-CODE_NOAUTH=$(curl -s -o /dev/null -w "%{http_code}" --max-time 12 "https://$DOMAIN/__health" || echo 000)
-echo "  /__health без пароля -> $CODE_NOAUTH (ожидаем 401)"
-if [ "$CODE_NOAUTH" = "401" ]; then
-  ok "TLS + basic_auth работают"
-else
-  warn "Ожидался 401, получили $CODE_NOAUTH. Проверьте DNS/Cloudflare и 'docker compose logs caddy'."
-fi
-echo "  Проверить с паролем: curl -u $ADMIN_USER:'<пароль>' https://$DOMAIN/__health  (ожидаем {\"ok\":true,...})"
-
-echo
-echo "${B}${G}═══ Установка завершена ═══${N}"
-cat <<EOF
-
-${B}Что дальше${N}
-
-1. ${B}DNS / Cloudflare${N}: убедитесь, что $DOMAIN указывает на сервер.
-   Рекомендуется Cloudflare (Proxied, SSL/TLS Full) — скрывает origin и
-   сглаживает обрывы соединения у некоторых провайдеров.
-
-2. ${B}Первый вход в Claude${N}: откройте https://$DOMAIN/ , войдите в Claude
-   по email (magic-link). Шлюз сам перехватит session-cookies в
-   gateway/cookies/$ADMIN_USER.json
-
-3. ${B}Расширение для клиентов${N}: уже собрано под ваш домен и лежит на
-   https://$DOMAIN/__ext/   (за логином/паролем). Дайте клиенту эту ссылку,
-   его логин и пароль — больше ничего собирать не нужно.
-
-4. ${B}Пользователи${N} (cd $DEPLOY_DIR):
-   ./add-user.sh <имя>            — создать (пароль сгенерируется и покажется один раз)
-   ./add-user.sh <имя> <пароль>   — создать/сменить пароль
-   ./remove-user.sh <имя>         — удалить
-   Статус сессий (только для $ADMIN_USER): curl -u $ADMIN_USER https://$DOMAIN/__admin/status
-
-5. ${B}Логи${N}:  cd $DEPLOY_DIR && docker compose logs -f gateway
-
-Документация: README.md, docs/DEPLOY-SERVER.md, docs/SETUP-CLIENT.md, SECURITY.md
-EOF
+CODE_NOAUTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 "https://$DOMAIN/__health" || true)
+echo "/__health без пароля: $CODE_NOAUTH (ожидаем 401; первая выдача сертификата может занять время)."
+printf 'Готово: https://%s/\nРасширения: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"

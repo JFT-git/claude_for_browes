@@ -12,18 +12,21 @@
   button { width: 100%; margin-top: 8px; padding: 8px; font-size: 13px; cursor: pointer; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }
   button.primary { background: #4f46e5; color: #fff; border: none; }
   button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.55; cursor: default; }
   #status-text { flex: 1; }
   .fp { color: #6b7280; font-size: 11px; margin-top: 4px; }
+  #debugger-note { line-height: 1.4; }
 </style>
 </head>
 <body>
   <h3>Gateway Connector</h3>
-  <div class="row"><span id="dot" class="dot unknown"></span><span id="status-text">Checking…</span></div>
+  <div class="row" role="status"><span id="dot" class="dot unknown"></span><span id="status-text">Проверяем защиту…</span></div>
   <div class="row host" id="host"></div>
   <div class="row fp" id="fp"></div>
-  <button id="open" class="primary">Open Claude</button>
-  <button id="test">Test connection</button>
-  <button id="settings">Settings</button>
+  <div class="fp" id="debugger-note" role="note"></div>
+  <button id="open" class="primary" disabled>Открыть Claude</button>
+  <button id="test">Проверить подключение</button>
+  <button id="settings">Настройки</button>
   <script src="popup.js"></script>
 </body>
 </html>
