@@ -128,7 +128,10 @@ jobs:
           test -n "$AMO_API_KEY" && test -n "$AMO_API_SECRET"
           mkdir -p "$RUNNER_TEMP/amo-signed"
           test -z "$(ls -A "$RUNNER_TEMP/amo-signed")"
-          npx --no-install web-ext sign --source-dir extension/dist/firefox \
+          # web-ext sign writes .amo-upload-uuid into its source directory; sign a
+          # copy so extension/dist/firefox stays the exact payload to verify.
+          cp -R extension/dist/firefox "$RUNNER_TEMP/amo-source"
+          npx --no-install web-ext sign --source-dir "$RUNNER_TEMP/amo-source" \
             --artifacts-dir "$RUNNER_TEMP/amo-signed" \
             --channel unlisted --api-key "$AMO_API_KEY" --api-secret "$AMO_API_SECRET"
       - name: Verify signed payload and prepare release assets
