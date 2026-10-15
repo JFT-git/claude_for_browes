@@ -224,8 +224,9 @@ def pipe(client, upstream, idle_timeout=IDLE_TIMEOUT, diagnostics=None):
     for sock in sockets:
         sock.setblocking(False)
     last_activity = time.monotonic()
-    # epoll/kqueue have no FD_SETSIZE ceiling; select() fails above FD 1023.
-    with selectors.DefaultSelector() as selector:
+    # poll() has no FD_SETSIZE ceiling (select() fails above FD 1023) and,
+    # unlike epoll, needs no extra descriptor per relay.
+    with getattr(selectors, "PollSelector", selectors.DefaultSelector)() as selector:
         interest = {}
         while True:
             for src, dst in ((client, upstream), (upstream, client)):
