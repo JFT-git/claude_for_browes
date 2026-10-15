@@ -18,9 +18,12 @@
       return url.host === host && url.hostname.includes(".") && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash;
     } catch (_) { return false; }
   }
-  function protectedHost(host) {
+  function artifactHost(host) {
     host = String(host).toLowerCase();
-    return ARTIFACT_DOMAINS.some(domain => host === domain || host.endsWith("." + domain)) || DEPENDENCY_HOSTS.includes(host);
+    return ARTIFACT_DOMAINS.some(domain => host === domain || host.endsWith("." + domain));
+  }
+  function protectedHost(host) {
+    return artifactHost(host) || DEPENDENCY_HOSTS.includes(String(host).toLowerCase());
   }
   function requiredOrigins(host) {
     if (!validGatewayHost(host)) throw new Error("Invalid gateway host");
@@ -47,15 +50,21 @@
     return [{ id: 2000, priority: 200, action: { type: "allow" }, condition: { requestDomains: [...ARTIFACT_DOMAINS], regexFilter: "^(?:https|wss)://[^/:]+/", resourceTypes: [...resourceTypes] } },
       ...DEPENDENCY_HOSTS.map((host, index) => ({ id: 2010 + index, priority: 200, action: { type: "allow" }, condition: { regexFilter: "^(?:https|wss)://" + escapeRegex(host) + "/", resourceTypes: [...resourceTypes] } }))];
   }
-  function buildPrivacyRules(host, resourceTypes = RESOURCE_TYPES) {
+  function buildScopedRestrictionRules(host) {
+    if (!validGatewayHost(host)) throw new Error("Invalid gateway host");
+    // Firefox runs in the user's everyday profile: only requests started by
+    // gateway pages or artifact frames are restricted. Top-level navigations
+    // (links opened from Claude) remain ordinary browsing.
+    const initiatorDomains = [new URL("https://" + host).hostname, ...ARTIFACT_DOMAINS];
+    return [
+      { id: 2002, priority: 150, action: { type: "block" }, condition: { initiatorDomains, excludedResourceTypes: ["main_frame"] } },
+      { id: 2003, priority: 350, action: { type: "block" }, condition: { regexFilter: "^(?:http|ws)://", initiatorDomains, excludedResourceTypes: ["main_frame"] } }
+    ];
+  }
+  function buildPrivacyRules(host, resourceTypes = RESOURCE_TYPES, { scoped = false } = {}) {
     if (!validGatewayHost(host)) throw new Error("Invalid gateway host");
     const gatewayDomain = new URL("https://" + host).hostname;
-    return [
-      // Do not remove Content-Security-Policy: DNR cannot safely remove only a
-      // frame-ancestors directive from a mixed policy. artifact-csp.js handles
-      // the narrow gateway ancestor addition while retaining every policy.
-      { id: 5, priority: 300, action: { type: "modifyHeaders", responseHeaders: [{ header: "x-frame-options", operation: "remove" }] }, condition: { regexFilter: "^https://(?:" + artifactPattern + ")/", initiatorDomains: [gatewayDomain], resourceTypes: ["sub_frame"] } },
-      { id: 2001, priority: 200, action: { type: "allow" }, condition: { regexFilter: "^(?:https|wss)://" + escapeRegex(host) + "/", resourceTypes: [...resourceTypes] } },
+    const restriction = scoped ? buildScopedRestrictionRules(host) : [
       // Dedicated browser profile: no initiator filter. Sandboxed opaque frames,
       // popups and service workers can omit the originating site's domain.
       // Only higher-priority gateway/redirect/ready TLS-route rules can allow
@@ -65,14 +74,22 @@
       // main_frame with an empty excluded list, so a separate rule covers it.
       ...buildProfileRestrictionRules(),
       // No unencrypted fallback, including destinations on the CONNECT list.
-      { id: 2003, priority: 350, action: { type: "block" }, condition: { regexFilter: "^(?:http|ws)://", excludedResourceTypes: [] } },
+      { id: 2003, priority: 350, action: { type: "block" }, condition: { regexFilter: "^(?:http|ws)://", excludedResourceTypes: [] } }
+    ];
+    return [
+      // Do not remove Content-Security-Policy: DNR cannot safely remove only a
+      // frame-ancestors directive from a mixed policy. artifact-csp.js handles
+      // the narrow gateway ancestor addition while retaining every policy.
+      { id: 5, priority: 300, action: { type: "modifyHeaders", responseHeaders: [{ header: "x-frame-options", operation: "remove" }] }, condition: { regexFilter: "^https://(?:" + artifactPattern + ")/", initiatorDomains: [gatewayDomain], resourceTypes: ["sub_frame"] } },
+      { id: 2001, priority: 200, action: { type: "allow" }, condition: { regexFilter: "^(?:https|wss)://" + escapeRegex(host) + "/", resourceTypes: [...resourceTypes] } },
+      ...restriction,
       // Claude/API sockets require the gateway's server-side cookie session.
       // Until a tested socket rewrite exists, reject them before any transport.
       { id: 2004, priority: 350, action: { type: "block" }, condition: { regexFilter: "^wss://", requestDomains: [...UPSTREAM_HOSTS], resourceTypes: ["websocket"] } }
     ];
   }
 
-  const api = Object.freeze({ DEPENDENCY_HOSTS, ARTIFACT_DOMAINS, UPSTREAM_HOSTS, RESOURCE_TYPES, protectedHost, protectedPattern, artifactPattern, validGatewayHost, requiredOrigins, fingerprintMatches, buildProfileRestrictionRules, buildProxyAllowRules, buildPrivacyRules });
+  const api = Object.freeze({ DEPENDENCY_HOSTS, ARTIFACT_DOMAINS, UPSTREAM_HOSTS, RESOURCE_TYPES, artifactHost, protectedHost, protectedPattern, artifactPattern, validGatewayHost, requiredOrigins, fingerprintMatches, buildProfileRestrictionRules, buildScopedRestrictionRules, buildProxyAllowRules, buildPrivacyRules });
   root.GatewayPrivacy = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);

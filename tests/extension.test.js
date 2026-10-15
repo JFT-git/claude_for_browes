@@ -8,7 +8,7 @@ const vm = require("node:vm");
 const { webcrypto, createHash } = require("node:crypto");
 
 // Exercise shipped logic; native tests separately verify browser API semantics.
-function backgroundFixture({ failRegistration = false, firefox = false, savedSession, fetchHook, storageHook, warmupHook, savedCandidate } = {}) {
+function backgroundFixture({ failRegistration = false, firefox = false, firefoxApis = false, firefoxPrivate = true, firefoxLegacy = false, savedSession, fetchHook, storageHook, warmupHook, savedCandidate } = {}) {
   const config = { gatewayHost: "gateway.example.test", authUser: "test-user", authPass: "test-password" };
   const rules = new Map(), sessionRules = new Map(), scripts = new Map(), alarms = new Map();
   const sessionStorage = savedSession ? { proxySession: savedSession } : {};
@@ -18,7 +18,7 @@ function backgroundFixture({ failRegistration = false, firefox = false, savedSes
   let permission = true;
   let installedProxy = { levelOfControl: "controlled_by_this_extension", value: {} };
   let installedPrediction = { levelOfControl: "controlled_by_this_extension", value: true };
-  let installedRTC = { levelOfControl: "controlled_by_this_extension", value: "default" };
+  let installedRTC = firefoxLegacy ? { levelOfControl: "controlled_by_this_extension", value: "proxy_only" } : { levelOfControl: "controllable_by_this_extension", value: "default" };
   const proxyChange = event(), rtcChange = event(), predictionChange = event();
   const chrome = {
     storage: {
@@ -27,7 +27,7 @@ function backgroundFixture({ failRegistration = false, firefox = false, savedSes
       onChanged: event()
     },
     declarativeNetRequest: {
-      updateDynamicRules: async ({ removeRuleIds = [], addRules = [] }) => { removeRuleIds.forEach(id => rules.delete(id)); addRules.forEach(rule => rules.set(rule.id, rule)); calls.dynamicSnapshots.push([...rules.keys()]); },
+      updateDynamicRules: async ({ removeRuleIds = [], addRules = [] }) => { removeRuleIds.forEach(id => rules.delete(id)); addRules.forEach(rule => rules.set(rule.id, rule)); calls.dynamicSnapshots.push([...rules.keys()]); if (firefoxApis && addRules.some(rule => rule.id === 2001)) calls.order.push("gateway"); },
       getDynamicRules: async () => [...rules.values()],
       updateSessionRules: async ({ removeRuleIds = [], addRules = [] }) => { calls.order.push(addRules.some(rule => rule.id === 2000) ? "allow" : addRules.length ? "warmup" : "block"); removeRuleIds.forEach(id => sessionRules.delete(id)); addRules.forEach(rule => sessionRules.set(rule.id, rule)); }
     },
@@ -55,15 +55,26 @@ function backgroundFixture({ failRegistration = false, firefox = false, savedSes
     webRequest: { onAuthRequired: event(), onCompleted: event(), onErrorOccurred: event() }
   };
   const now = { value: Date.now() };
+  let ffSettings = firefoxLegacy ? { levelOfControl: "controlled_by_this_extension", value: { proxyType: "manual", http: "127.0.0.1:9", ssl: "127.0.0.1:9" } } : { levelOfControl: "controllable_by_this_extension", value: {} };
+  const ffChange = event();
+  const ffBrowser = firefoxApis ? { ...chrome, runtime: { ...chrome.runtime, getPlatformInfo: async () => ({ os: "linux" }) },
+    extension: { isAllowedIncognitoAccess: async () => firefoxPrivate },
+    proxy: { onRequest: event(), settings: { get: async () => ffSettings,
+      set: async ({ value }) => { calls.order.push("baseline"); ffSettings = { levelOfControl: "controlled_by_this_extension", value }; ffChange.emit(ffSettings); },
+      clear: async () => { calls.order.push("clear-baseline"); ffSettings = { levelOfControl: "controllable_by_this_extension", value: {} }; ffChange.emit(ffSettings); }, onChange: ffChange } },
+    webRequest: { ...chrome.webRequest, onBeforeRequest: event() } } : undefined;
+  if (firefoxApis) ffBrowser.runtime.getURL = chrome.runtime.getURL = value => "moz-extension://firefox-internal-uuid" + value;
   const sampleSession = (overrides = {}) => ({ proxyUsername: "gateway-proxy", proxyPassword: "A".repeat(43), expiresAt: now.value + 900000, proxy: { scheme: "https", host: "proxy.example.test", port: 8443 }, ...overrides });
-  const context = vm.createContext({ chrome, browser: firefox ? { proxy: { onRequest: event() } } : undefined, URL, TextEncoder, AbortController, crypto: webcrypto,
+  const context = vm.createContext({ chrome, browser: firefoxApis ? ffBrowser : firefox ? { ...chrome, proxy: { onRequest: event() } } : undefined, URL, TextEncoder, AbortController, crypto: webcrypto,
     Date: class extends Date { static now() { return now.value; } },
     btoa: text => Buffer.from(text, "latin1").toString("base64"), setTimeout: () => 1, clearTimeout() {}, console: { error() {} },
     fetch: async (url, options) => {
       calls.fetch.push({ url, options });
       if (options?.method === "HEAD") {
         const authenticate = () => {
-          context.warmAuth = { isProxy: true, url, method: "HEAD", initiator: "chrome-extension://test-extension", challenger: vm.runInContext("({...proxyWarmup.session.proxy})", context), scheme: "basic", realm: "gateway-proxy", requestId: "warmup-" + calls.fetch.length };
+          context.warmAuth = { isProxy: true, url, method: "HEAD", ...(firefoxApis ? { originUrl: "moz-extension://firefox-internal-uuid/background.html" } : { initiator: "chrome-extension://test-extension" }), challenger: vm.runInContext("({...proxyWarmup.session.proxy})", context), scheme: "basic", realm: "gateway-proxy", requestId: "warmup-" + calls.fetch.length };
+          // Firefox authenticates by header on the routed request; Chrome answers the 407 challenge.
+          if (firefoxApis) return vm.runInContext("proxyFirefox.route(warmAuth)", context);
           const result = vm.runInContext("onProxyAuth(warmAuth)", context);
           chrome.webRequest.onCompleted.emit({ requestId: context.warmAuth.requestId });
           return result;
@@ -76,6 +87,14 @@ function backgroundFixture({ failRegistration = false, firefox = false, savedSes
     }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../extension/privacy-rules.js"), "utf8"), context);
+  if (firefoxApis) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../extension/proxy-firefox.js"), "utf8"), context);
+    context.GatewayArtifactFirefox = { create: ({ isReady }) => {
+      let active = false;
+      return { async configure() { calls.order.push("artifact-ready"); active = true; }, async stop() { active = false; }, clearSuppressed() {},
+        status() { return { available: true, active: active && isReady(), attachedTabs: 0, lastError: "" }; } };
+    } };
+  }
   const source = fs.readFileSync(path.join(__dirname, "../extension/background.js"), "utf8");
   vm.runInContext(source.replace(/\ninitialize\(\)\.catch\(\(\) => \{\}\);\s*$/, "\n"), context);
   return { context, config, rules, sessionRules, scripts, calls, alarms, chrome, now, sampleSession, sessionStorage,
@@ -83,6 +102,7 @@ function backgroundFixture({ failRegistration = false, firefox = false, savedSes
     loseProxy() { installedProxy = { value: { mode: "direct" }, levelOfControl: "controlled_by_other_extensions" }; proxyChange.emit(installedProxy); },
     losePrediction() { installedPrediction = { value: true, levelOfControl: "controlled_by_other_extensions" }; predictionChange.emit(installedPrediction); },
     loseRTC() { installedRTC = { value: "default", levelOfControl: "controlled_by_other_extensions" }; rtcChange.emit(installedRTC); },
+    loseFirefoxProxy() { ffSettings = { value: { proxyType: "none" }, levelOfControl: "controlled_by_other_extensions" }; ffChange.emit(ffSettings); },
     run: expression => vm.runInContext(expression, context), flush: () => vm.runInContext("operationQueue", context) };
 }
 const binding = cfg => createHash("sha256").update(JSON.stringify([cfg.gatewayHost, cfg.authUser, cfg.authPass])).digest("hex");
@@ -93,7 +113,8 @@ const plain = value => JSON.parse(JSON.stringify(value));
 for (const browser of ["chrome", "firefox"]) test(browser + " manifest ships startup blocks and required security capabilities", () => {
   const m = JSON.parse(fs.readFileSync(path.join(__dirname, "../extension/manifest." + browser + ".json")));
   for (const permission of ["privacy", "alarms", "proxy", "webRequest", "declarativeNetRequest"]) assert(m.permissions.includes(permission));
-  assert(m.host_permissions.includes("https://*.claudeusercontent.com/*"));
+  const hostPermissions = browser === "firefox" ? m.permissions.filter(value => value.startsWith("https://")) : m.host_permissions;
+  assert(hostPermissions.includes("https://*.claudeusercontent.com/*"));
   assert.equal(m.declarative_net_request.rule_resources[0].enabled, true);
   const blocks = JSON.parse(fs.readFileSync(path.join(__dirname, "../extension/" + m.declarative_net_request.rule_resources[0].path)));
   const block = blocks[0];
@@ -103,10 +124,28 @@ for (const browser of ["chrome", "firefox"]) test(browser + " manifest ships sta
   const expression = new RegExp(block.condition.regexFilter);
   const matcher = { test(value) { const host = new URL(value).hostname; return expression.test(value) && block.condition.requestDomains.some(domain => host === domain || host.endsWith("." + domain)); } };
   assert(block.condition.regexFilter.length < 30);
-  for (const url of ["https://a.frame.claudeusercontent.com/", "https://claudemcpcontent.com/", "https://cdn.jsdelivr.net:8443/a", "http://esm.sh/", "wss://fonts.gstatic.com/", "https://claude.ai/", "https://api.anthropic.com/", "https://assets.claude.ai/"]) assert(matcher.test(url), url);
+  for (const url of ["https://a.frame.claudeusercontent.com/", "https://claudemcpcontent.com/", "https://claude.ai/", "https://api.anthropic.com/", "https://assets.claude.ai/"]) assert(matcher.test(url), url);
+  // Firefox shares these CDNs with the user's other sites; only Chromium's dedicated profile blocks them at startup.
+  for (const url of ["https://cdn.jsdelivr.net:8443/a", "http://esm.sh/", "wss://fonts.gstatic.com/"]) assert.equal(matcher.test(url), browser === "chrome", url);
   assert.equal(matcher.test("https://cdn.jsdelivr.net.evil.test/"), false);
-  if (browser === "chrome") assert.equal(m.minimum_chrome_version, "125");
-  else { assert.equal(m.browser_specific_settings.gecko.strict_min_version, "140.0"); assert(m.permissions.includes("webRequestBlocking")); }
+  if (browser === "chrome") { assert.equal(m.minimum_chrome_version, "125"); assert.equal(m.manifest_version, 3); }
+  else {
+    const chromeManifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../extension/manifest.chrome.json")));
+    assert.equal(m.manifest_version, 2); assert.equal(m.host_permissions, undefined); assert.equal(m.optional_host_permissions, undefined);
+    assert.deepEqual([...hostPermissions].sort(), [...chromeManifest.host_permissions].sort());
+    assert.deepEqual(m.optional_permissions, chromeManifest.optional_host_permissions);
+    assert.equal(m.browser_action.default_popup, chromeManifest.action.default_popup);
+    assert.equal(m.background.persistent, true);
+    for (const file of ["privacy-rules.js", "artifact-csp.js", "artifact-cors.js", "artifact-firefox.js", "proxy-firefox.js", "background.js"]) assert(m.background.scripts.includes(file));
+    assert.equal(m.browser_specific_settings.gecko.strict_min_version, "140.0"); assert(m.permissions.includes("webRequestBlocking"));
+  }
+});
+
+test("changelog documents the released manifest version", () => {
+  const version = JSON.parse(fs.readFileSync(path.join(__dirname, "../extension/manifest.chrome.json"))).version;
+  assert.equal(JSON.parse(fs.readFileSync(path.join(__dirname, "../extension/manifest.firefox.json"))).version, version);
+  const changelog = fs.readFileSync(path.join(__dirname, "../CHANGELOG.md"), "utf8");
+  assert(changelog.split("\n").some(line => line === "## " + version || line.startsWith("## " + version + " ")), "CHANGELOG.md needs a section for " + version);
 });
 
 test("Basic credentials match only the exact HTTPS authority, including port", () => {
@@ -237,10 +276,108 @@ test("old async token response cannot resurrect route after credential change", 
   assert.equal(f.calls.order.filter(x => x === "allow").length, 1);
 });
 
-test("Firefox keeps bundled block and rejects protected routes until failover is proven safe", async () => {
+test("Firefox without required proxy APIs keeps packaged blocks and rejects protected routes", async () => {
   const f = backgroundFixture({ firefox: true }); assert.equal((await f.run("initialize()")).ok, false);
   assert.equal(f.sessionRules.size, 0);
   await assert.rejects(f.run('firefoxProxyRequest({url:"https://a.frame.claudeusercontent.com/"})'), /Secure proxy routing unavailable/);
+});
+
+test("Firefox verifies the routed UUID-scoped HEAD and artifact adapter before public allowance", async () => {
+  let f;
+  f = backgroundFixture({ firefoxApis: true, warmupHook: async ({ url }) => {
+    assert.equal(f.run("proxyReady"), false);
+    assert.equal(f.run("proxyFirefox.status().baselineReady"), true);
+    assert.deepEqual(plain(f.sessionRules.get(2020).condition.initiatorDomains), ["firefox-internal-uuid"]);
+    f.context.ffWarmInput = { url, method: "HEAD", originUrl: "moz-extension://firefox-internal-uuid/background.html" };
+    const route = await f.run("firefoxProxyRequest(ffWarmInput)");
+    assert.equal(route.type, "https");
+    assert.match(route.proxyAuthorizationHeader, /^Basic /);
+    return { status: 200 };
+  } });
+  assert.equal((await f.run("initialize()")).ok, true);
+  assert(f.calls.order.indexOf("warmup") < f.calls.order.indexOf("artifact-ready"));
+  assert(f.calls.order.indexOf("artifact-ready") < f.calls.order.indexOf("allow"));
+  assert.equal((await f.run("status()")).proxyPlatform, "firefox");
+  assert.equal(f.run("proxyFirefox.status().sessionReady"), true);
+});
+
+test("Firefox leaves browser-wide settings to the user and restricts only Claude initiators", async () => {
+  const f = backgroundFixture({ firefoxApis: true });
+  assert.equal((await f.run("initialize()")).ok, true);
+  assert.equal(f.calls.order.includes("baseline"), false, "no browser-wide proxy");
+  assert.equal(f.calls.order.includes("pac"), false);
+  const rtc = await f.chrome.privacy.network.webRTCIPHandlingPolicy.get();
+  assert.equal(rtc.value, "default"); assert.notEqual(rtc.levelOfControl, "controlled_by_this_extension");
+  assert.equal((await f.chrome.privacy.network.networkPredictionEnabled.get()).value, true);
+  assert.equal(f.rules.has(2005), false);
+  for (const id of [2002, 2003]) assert.deepEqual(plain(f.rules.get(id).condition.initiatorDomains), ["gateway.example.test", "claudeusercontent.com", "claudemcpcontent.com"]);
+  assert(f.rules.has(1) && f.rules.has(2001));
+});
+
+test("Firefox needs no private-window access", async () => {
+  const f = backgroundFixture({ firefoxApis: true, firefoxPrivate: false });
+  assert.equal((await f.run("initialize()")).ok, true);
+  assert(f.rules.has(2001)); assert(f.sessionRules.has(2000));
+  assert.equal((await f.run("status()")).proxyReady, true);
+});
+
+test("Firefox upgrade releases the earlier browser-wide proxy even before the gateway is authorized", async () => {
+  const f = backgroundFixture({ firefoxApis: true, firefoxLegacy: true });
+  f.revokePermission(); await f.flush();
+  assert.equal((await f.run("initialize()")).ok, false);
+  assert(f.calls.order.includes("clear-baseline"));
+  assert.notEqual((await f.chrome.privacy.network.webRTCIPHandlingPolicy.get()).levelOfControl, "controlled_by_this_extension");
+});
+
+test("Firefox upgrade returns the earlier browser-wide proxy and WebRTC settings to the user", async () => {
+  const f = backgroundFixture({ firefoxApis: true, firefoxLegacy: true });
+  assert.equal((await f.run("initialize()")).ok, true);
+  assert(f.calls.order.includes("clear-baseline"));
+  const rtc = await f.chrome.privacy.network.webRTCIPHandlingPolicy.get();
+  assert.equal(rtc.value, "default"); assert.notEqual(rtc.levelOfControl, "controlled_by_this_extension");
+  assert.equal(f.run("proxyReady"), true);
+});
+
+test("Firefox MV2 background uses native promise APIs rather than callback-only chrome aliases", async () => {
+  const f = backgroundFixture({ firefoxApis: true });
+  f.context.chrome = new Proxy({}, { get() { throw new Error("MV2 chrome alias is callback-only"); } });
+  assert.equal((await f.run("initialize()")).ok, true);
+  assert.equal((await f.run("healthCheck()")).ok, true);
+  assert.equal((await f.run("status()")).proxyReady, true);
+});
+
+test("Firefox keeps its route when the user changes browser proxy or WebRTC settings, and closes on expiry", async () => {
+  for (const cause of ["proxy", "privacy"]) {
+    const f = backgroundFixture({ firefoxApis: true }); assert.equal((await f.run("initialize()")).ok, true);
+    if (cause === "proxy") f.loseFirefoxProxy(); else f.loseRTC();
+    await f.flush();
+    assert(f.sessionRules.has(2000), cause); assert.equal(f.run("proxyReady"), true, cause);
+  }
+  const f = backgroundFixture({ firefoxApis: true }); assert.equal((await f.run("initialize()")).ok, true);
+  f.now.value += 1000000; f.chrome.alarms.onAlarm.emit({ name: "proxy-expire" });
+  await f.flush();
+  assert.equal(f.sessionRules.size, 0); assert.equal(f.run("proxyReady"), false);
+});
+
+test("Firefox warmup that bypassed the proxy route never opens the artifact route", async () => {
+  const f = backgroundFixture({ firefoxApis: true, warmupHook: async () => ({ status: 200 }) });
+  assert.equal((await f.run("initialize()")).ok, false);
+  assert.equal(f.sessionRules.size, 0); assert.equal(f.run("proxyReady"), false);
+});
+
+test("Firefox unready auth requires the trusted moz-extension UUID and exact HEAD", async () => {
+  let f;
+  f = backgroundFixture({ firefoxApis: true, warmupHook: async ({ url, authenticate }) => {
+    let number = 0;
+    for (const extra of [{}, { originUrl: "https://gateway.example.test/" }, { originUrl: "moz-extension://foreign/background.html" },
+      { originUrl: "chrome-extension://firefox-internal-uuid/" }, { originUrl: "https://foreign.test/", documentUrl: "moz-extension://firefox-internal-uuid/" },
+      { originUrl: "moz-extension://firefox-internal-uuid/", method: "GET" }]) {
+      const result = auth(f, { url, method: "HEAD", requestId: "fx-wrong-" + (++number), ...extra });
+      assert.equal(result.cancel, true); assert.equal(result.authCredentials, undefined);
+    }
+    authenticate(); return { status: 200 };
+  } });
+  assert.equal((await f.run("initialize()")).ok, true);
 });
 
 

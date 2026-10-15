@@ -65,9 +65,32 @@ jobs:
       - run: npm run test:fingerprint
       - run: npm run test:browser
 
+  firefox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci --ignore-scripts
+      - name: Install Firefox
+        id: firefox
+        uses: browser-actions/setup-firefox@v1
+        with:
+          firefox-version: '158.0'
+      - name: Native Firefox route and artifact checks
+        env:
+          FIREFOX: ${{ steps.firefox.outputs.firefox-path }}
+        run: |
+          # The direct-egress control must be reachable at the real HTTPS port.
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+          npm run test:firefox
+
   release:
-    needs: [test, build-addons, browser]
+    needs: [test, build-addons, browser, firefox]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    concurrency:
+      group: signed-extension-release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -83,75 +106,93 @@ jobs:
         run: |
           V=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' extension/manifest.chrome.json | head -1)
           echo "version=$V" >> "$GITHUB_OUTPUT"
-      - name: Create or update release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require an unpublished version
         run: |
+          set -eu
           V="${{ steps.ver.outputs.version }}"
-          TAG="v$V"
-          gh release create "$TAG" \
-            --title "Claude Gateway $V" \
-            --notes "Prebuilt extension packages are not bound to a gateway. Install the package, open the extension Options, enter your gateway host, username, and password, then save and grant the requested host permissions." \
-            releases/claude-gateway-chrome-v$V.zip \
-            releases/claude-gateway-firefox-v$V.zip \
-            releases/SHA256SUMS \
-            --target main || true
-      - name: Check AMO secrets
-        id: amo
+          EXISTING_TAG=$(git ls-remote --tags origin "refs/tags/v$V" "refs/tags/v$V^{}")
+          test -z "$EXISTING_TAG" || { echo "Version tag already exists; refusing to replace release content."; exit 1; }
+      - name: Require a changelog entry
         run: |
-          if [ -n "${{ secrets.AMO_API_KEY }}" ] && [ -n "${{ secrets.AMO_API_SECRET }}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          fi
+          set -eu
+          V="${{ steps.ver.outputs.version }}"
+          awk -v v="$V" 'found && /^## / { exit } found { print } $0 == "## " v || index($0, "## " v " ") == 1 { found = 1 }' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md" || { echo "CHANGELOG.md has no entry for $V"; exit 1; }
+          printf '\n---\n%s\n' "Signed Firefox Desktop add-on and Chrome package. Use a dedicated Chrome profile; Firefox restricts only Claude traffic and works in the everyday profile. Open Options, enter the gateway and credentials, and grant gateway access. See SECURITY.md for tested scenarios and limitations." >> "$RUNNER_TEMP/release-notes.md"
       - name: Sign Firefox add-on on AMO (unlisted)
-        if: steps.amo.outputs.present == 'true'
         env:
           AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
           AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
         run: |
-          set +e
+          set -eu
+          test -n "$AMO_API_KEY" && test -n "$AMO_API_SECRET"
+          mkdir -p "$RUNNER_TEMP/amo-signed"
+          test -z "$(ls -A "$RUNNER_TEMP/amo-signed")"
           npx --no-install web-ext sign --source-dir extension/dist/firefox \
-            --artifacts-dir extension/dist/amo-signed \
-            --channel unlisted --api-key "$AMO_API_KEY" --api-secret "$AMO_API_SECRET" > /tmp/amo-sign.txt 2>&1
-          code=$?
-          cat /tmp/amo-sign.txt
-          if [ "$code" -ne 0 ]; then
-            if grep -q "Conflict" /tmp/amo-sign.txt; then
-              echo "This Firefox version is already signed — continuing"
-              exit 0
-            fi
-            exit "$code"
-          fi
-      - name: Attach signed XPI to release + update updates.json
-        if: steps.amo.outputs.present == 'true'
+            --artifacts-dir "$RUNNER_TEMP/amo-signed" \
+            --channel unlisted --api-key "$AMO_API_KEY" --api-secret "$AMO_API_SECRET"
+      - name: Verify signed payload and prepare release assets
+        run: |
+          set -eu
+          V="${{ steps.ver.outputs.version }}"
+          mapfile -t XPIS < <(find "$RUNNER_TEMP/amo-signed" -maxdepth 1 -type f -name '*.xpi')
+          test "${#XPIS[@]}" -eq 1
+          python3 extension/verify-firefox-package.py extension/dist/firefox "${XPIS[0]}" "$V"
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          cp "releases/claude-gateway-chrome-v$V.zip" "$RUNNER_TEMP/release-assets/"
+          cp "releases/claude-gateway-firefox-v$V.zip" "$RUNNER_TEMP/release-assets/"
+          cp "${XPIS[0]}" "$RUNNER_TEMP/release-assets/gateway-connector-firefox-$V.xpi"
+          cd "$RUNNER_TEMP/release-assets"
+          sha256sum ./*.zip ./*.xpi > SHA256SUMS
+      - name: Upload and verify draft before publishing Latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eu
           V="${{ steps.ver.outputs.version }}"
-          XPI=$(ls extension/dist/amo-signed/*.xpi 2>/dev/null | head -1)
-          if [ -z "$XPI" ]; then
-            echo "No new signed XPI — this version is already on AMO"
-            exit 0
-          fi
-          OUT="gateway-connector-firefox-$V.xpi"
-          cp "$XPI" "$OUT"
-          gh release upload "v$V" "$OUT" --clobber
+          TAG="v$V"
+          gh release create "$TAG" --draft --latest=false --target "$GITHUB_SHA" \
+            --title "Claude Gateway $V" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "$RUNNER_TEMP/release-assets/claude-gateway-chrome-v$V.zip" \
+            "$RUNNER_TEMP/release-assets/claude-gateway-firefox-v$V.zip" \
+            "$RUNNER_TEMP/release-assets/gateway-connector-firefox-$V.xpi" \
+            "$RUNNER_TEMP/release-assets/SHA256SUMS"
+          mkdir -p "$RUNNER_TEMP/release-downloaded"
+          gh release download "$TAG" --dir "$RUNNER_TEMP/release-downloaded"
+          diff "$RUNNER_TEMP/release-assets/SHA256SUMS" "$RUNNER_TEMP/release-downloaded/SHA256SUMS"
+          (cd "$RUNNER_TEMP/release-downloaded" && sha256sum --check SHA256SUMS)
+          gh release edit "$TAG" --draft=false --latest
+      - name: Publish Firefox update manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          V="${{ steps.ver.outputs.version }}"
           python3 extension/update-updates-json.py "$V" updates.json
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add updates.json
-          git commit -m "updates.json: signed xpi for v$V [skip ci]" || true
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "updates.json: signed xpi for v$V [skip ci]"
+            git push
+          fi
       - name: Check Chrome Web Store secrets
         id: cws
-        if: always()
+        env:
+          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          CWS_PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
         run: |
-          if [ -n "${{ secrets.CWS_CLIENT_ID }}" ] && [ -n "${{ secrets.CWS_CLIENT_SECRET }}" ] \
-            && [ -n "${{ secrets.CWS_REFRESH_TOKEN }}" ] && [ -n "${{ secrets.CWS_PUBLISHER_ID }}" ] \
-            && [ -n "${{ secrets.CWS_EXTENSION_ID }}" ]; then
+          if [ -n "$CWS_CLIENT_ID" ] && [ -n "$CWS_CLIENT_SECRET" ] \
+            && [ -n "$CWS_REFRESH_TOKEN" ] && [ -n "$CWS_PUBLISHER_ID" ] \
+            && [ -n "$CWS_EXTENSION_ID" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Publish Chrome add-on
-        if: always() && steps.cws.outputs.present == 'true'
+        if: steps.cws.outputs.present == 'true'
         env:
           CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
           CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}

@@ -1,7 +1,7 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "Gateway Connector for Claude",
-  "version": "2.0.5",
+  "version": "2.0.6",
   "description": "Routes claude.ai through your gateway. Enter your gateway host once \u2014 one build for all domains.",
   "permissions": [
     "declarativeNetRequest",
@@ -11,46 +11,8 @@
     "webRequest",
     "privacy",
     "alarms",
-    "webRequestBlocking"
-  ],
-  "background": {
-    "scripts": [
-      "privacy-rules.js",
-      "artifact-cors.js",
-      "background.js"
-    ]
-  },
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "Claude Gateway"
-  },
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": true
-  },
-  "icons": {
-    "48": "icon48.png",
-    "128": "icon128.png"
-  },
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "{3f7a9c2e-8b4d-4e1a-9c5f-2d6b8a4e7f1c}",
-      "strict_min_version": "140.0",
-      "data_collection_permissions": {
-        "required": [
-          "none"
-        ]
-      },
-      "update_url": "https://raw.githubusercontent.com/JFT-git/claude_for_browes/main/updates.json"
-    },
-    "gecko_android": {
-      "strict_min_version": "142.0"
-    }
-  },
-  "optional_permissions": [
-    "https://*/*"
-  ],
-  "host_permissions": [
+    "webRequestBlocking",
+    "webNavigation",
     "https://claude.ai/*",
     "https://www.claude.ai/*",
     "https://assets.claude.ai/*",
@@ -72,13 +34,51 @@
     "https://code.jquery.com/*",
     "https://cdn.plot.ly/*"
   ],
+  "background": {
+    "scripts": [
+      "privacy-rules.js",
+      "artifact-csp.js",
+      "artifact-cors.js",
+      "artifact-firefox.js",
+      "proxy-firefox.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{3f7a9c2e-8b4d-4e1a-9c5f-2d6b8a4e7f1c}",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      },
+      "update_url": "https://raw.githubusercontent.com/JFT-git/claude_for_browes/main/updates.json"
+    }
+  },
+  "optional_permissions": [
+    "https://*/*"
+  ],
   "declarative_net_request": {
     "rule_resources": [
       {
         "id": "proxy_blocks",
         "enabled": true,
-        "path": "proxy-block-rules.json"
+        "path": "proxy-block-rules.firefox.json"
       }
     ]
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "Claude Gateway"
   }
 }
