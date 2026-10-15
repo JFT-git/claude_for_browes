@@ -249,17 +249,24 @@ async function launchFirefoxHarness({ sourceDir = DEFAULT_FIREFOX_PACKAGE, insta
 }
 
 async function stopFirefoxHarness(harness) {
-  // Terminating web-ext leaves its Firefox running, so ask the browser to quit.
+  // Terminating web-ext leaves its Firefox running, so ask the browser to quit;
+  // web-ext then exits by itself and removes its copy of the profile.
   try { await harness.client.command("Marionette:Quit", { flags: ["eForceQuit"] }); } catch { /* Browser may already be closing. */ }
   await harness.client.close();
-  if (harness.child.exitCode === null) {
-    harness.child.kill("SIGTERM");
-    await waitForChildExit(harness.child, 5000);
+  const { child } = harness;
+  if (child.exitCode === null && child.signalCode === null) {
+    let timer;
+    await Promise.race([new Promise(resolve => child.once("exit", resolve)), new Promise(resolve => { timer = setTimeout(resolve, 10000); })]);
+    clearTimeout(timer);
   }
-  // web-ext owns this disposable profile; remove any remnant only after the
-  // browser and temporary-addon runner have exited.
-  // A quitting browser may still be flushing its profile; retry the removal.
-  fs.rmSync(harness.tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM");
+    await waitForChildExit(child, 5000);
+  }
+  // Remove any remnant only after the browser and web-ext have exited. A
+  // leftover temporary directory must not fail the test or skip later hooks.
+  try { fs.rmSync(harness.tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+  catch { /* The OS temporary-file cleanup owns any remnant. */ }
 }
 
 function createFixtureCA(directory, dnsNames = ["gateway.audit.test", "proxy.audit.test", "collector.audit.test"]) {
