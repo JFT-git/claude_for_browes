@@ -107,6 +107,21 @@ Used only to notice when the browser asks for credentials for that gateway proxy
 Fills in the gateway username and password the user already saved, so the preview proxy does not show a second login prompt. Those credentials are sent only to the user's own gateway.
 ```
 
+**privacy:**
+```
+Keeps the gateway route from being bypassed in the dedicated browser profile: sets WebRTC IP handling to "disable_non_proxied_udp" and turns off network prediction so the browser does not pre-connect to other addresses. The previous settings are restored when the extension is disabled or removed.
+```
+
+**alarms:**
+```
+Renews the short-lived gateway proxy session (about 15 minutes) shortly before it expires and closes the protected route when it expires. No data is collected.
+```
+
+**debugger:**
+```
+Used only on tabs of the user's own gateway and the Claude document-preview frames inside them. It adds the gateway origin to the preview response's Content-Security-Policy frame-ancestors and handles CORS for preview exports, so previews can be shown inside the gateway page. Responses are processed in memory only, are not stored and are never sent to the developer. Chrome shows its standard debugging banner while this is active.
+```
+
 **Использование удалённого кода:**
 ```
 This extension does not use remotely hosted code. All JavaScript is bundled inside the extension package. The extension only redirects web requests to the user's own server; it never downloads or executes code from remote sources.
@@ -129,13 +144,16 @@ https://claude.jft-foruse.com/privacy
 
 | Разрешение | Обоснование |
 |---|---|
-| **Host access (`https://*/*`)** | The user configures their own self-hosted gateway domain in the options page; the extension requests access only to that domain to route Claude traffic through it. |
+| **Host access** | Fixed hosts: claude.ai and its asset/API hosts (redirected to the user's gateway), the Claude document-preview domains (claudeusercontent.com, claudemcpcontent.com) and the public libraries those previews load (jsDelivr, cdnjs, unpkg, Google Fonts, esm.sh, Tailwind CDN, jQuery CDN, Plotly CDN). The optional `https://*/*` is requested at runtime only for the single gateway domain the user enters in the options page. |
 | **declarativeNetRequest** | Routes Claude web app requests to the user-configured gateway host and signs them with the user's credentials. |
 | **scripting** | Applies consistent interface settings (UTC time zone, en-US language) and privacy controls on the gateway page. |
 | **storage** | Saves the user's gateway host and credentials locally in the browser. |
 | **proxy** | Sends document-preview connections through the user's own gateway. No other sites are proxied. |
 | **webRequest** | Detects when the browser asks for the gateway proxy login. Does not read page contents. |
 | **webRequestAuthProvider** | Submits the saved gateway username and password to the user's own gateway proxy. |
+| **privacy** | Prevents WebRTC and network prediction from bypassing the gateway route; previous settings are restored on removal. |
+| **alarms** | Renews the short-lived gateway proxy session before it expires. |
+| **debugger** | Lets Claude document previews embed in the gateway page by adjusting only their frame-ancestors/CORS headers, on gateway tabs only. Nothing is stored or sent to the developer. |
 
 ### Графика
 
