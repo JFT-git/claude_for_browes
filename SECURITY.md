@@ -29,9 +29,23 @@
 
 Расширение меняет часть браузерных API для страниц шлюза и артефактов: часовой пояс/локаль. WebRTC UDP ограничивается настройкой браузера. Оно не делает браузер анонимным и не нормализует экран, шрифты, GPU/canvas или TLS/HTTP2-отпечаток. Gateway по умолчанию передаёт Claude User-Agent браузера; `FIXED_UA` может его изменить и требует согласованной проверки client hints. Нельзя считать fingerprint активным, пока popup явно не подтверждает его регистрацию и не пройдена проверка раннего запуска скрипта в целевом браузере.
 
-Поддержка браузеров зависит от сборки и её минимальной версии в manifest. Для Chromium-сборки 2.0.5 требуется Chrome 125+ из-за OOPIF debugger sessions; для Firefox package minimum — 140, но secure CONNECT и artifact preview там намеренно fail-closed/unsupported. Не считайте Firefox полноценным клиентом.
+Поддержка браузеров зависит от сборки и её минимальной версии в manifest. Для Chromium-сборки 2.0.5 требуется Chrome 125+ из-за OOPIF debugger sessions. Для Firefox Desktop minimum — 140; его модель описана ниже. Firefox для Android не поддерживается. Разрешение «Запуск в приватных окнах» Firefox-сборке не требуется: без него расширение просто не действует в приватных окнах.
 
 Для Chromium artifact маршруты открываются только после защищённой проверки gateway, настройки HTTPS CONNECT и фиксированного no-body HTTPS `HEAD` через CONNECT. На свежей сессии нужны 2xx и реальный proxy-auth callback с новым токеном; timeout/redirect/auth failure оставляет маршруты закрытыми. Перед открытием применяется только точное временное правило к этому запросу, которое удаляет origin Authorization/Cookie и response Set-Cookie. При потере proxy-контроля разрешающее правило закрывается. Claude/API WebSocket пути пока fail-closed, пока их cookie-сессионный rewrite не подтверждён. Проверки реального выхода с момента старта, смены конфигурации и отказа proxy остаются обязательными для релизной оценки.
+
+### Firefox Desktop: ограничение только для Claude
+
+Firefox обычно используется как основной браузер, поэтому с версии 2.0.6 Firefox-сборка не ограничивает весь профиль. До 2.0.6 она ставила глобальный proxy `127.0.0.1:9` и profile-wide DNR-блокировку: в Firefox это отключало интернет для всех сайтов, ломало WebRTC и требовало доступа к приватным окнам. Сейчас:
+
+- `browser.proxy.settings`, WebRTC policy и network prediction не меняются. Оставшиеся от прежних сборок значения, которыми управляло это расширение, сбрасываются при обновлении.
+- Запросы к `claude.ai` и хостам Anthropic перенаправляются на gateway (DNR). Пока шлюз не настроен, эти хосты и artifact-домены заблокированы packaged-правилами; общие CDN (jsDelivr, Google Fonts и др.) для других сайтов не блокируются.
+- Область Claude — это artifact-хосты, страницы точного gateway origin и artifact-фреймы. Принадлежность определяется по `originUrl`/`documentUrl`/`frameAncestors`, поэтому в неё входят и opaque sandboxed frames, и blob workers. Из этой области разрешены только gateway, хосты Claude (их перенаправляют на gateway) и CONNECT allowlist. Остальное, включая cleartext, отменяет blocking `webRequest`; дополнительно действует DNR-правило, ограниченное этими инициаторами. Top-level переходы по ссылкам из Claude остаются обычной навигацией.
+- Artifact/CDN-запросы из области Claude получают HTTPS proxy с заголовком `Proxy-Authorization` и отдельным `connectionIsolationKey` на каждую сессию. Пока сессия не готова, они уходят в dead-end, а blocking listener их отменяет. Те же CDN-запросы других сайтов идут по собственным настройкам Firefox.
+- Маршрут открывается только после фиксированного `HEAD` к jsDelivr, который должен пройти через выданный proxy route.
+
+WebRTC в gateway/artifact realms убирает `fingerprint.js`; workers им не покрыты, а глобальная UDP-политика Firefox, в отличие от Chromium, не меняется. Native-проверка `tests/firefox-scoped.browser.test.js` на Firefox 158 подтверждает: обычные сайты (включая общий CDN и HTTP) работают, `claude.ai` перенаправляется на gateway, CDN и артефакты из Claude идут через аутентифицированный relay, а неизвестные и cleartext-адреса из Claude блокируются. Проверка отсутствия DIRECT fallback при отказе relay наблюдаема только с listener на loopback :443, как в CI.
+
+Firefox использует native response-header adapter вместо Chrome `debugger`/CDP и не читает тело ответа для совместимости. Для eligible HTTP 200 non-attachment artifact iframe response в проверенной gateway-owned области снимается `X-Frame-Options`, и добавляется только точный gateway origin в подходящий `frame-ancestors`; прочие CSP-политики, nonce и прочие заголовки (включая дубликаты) сохраняются. Для CORS корректируются только согласованная пара `Origin`/одного точного `Access-Control-Allow-Origin` на HTTPS GET/HEAD в разрешённой области; wildcard и credential grants не добавляются. OPTIONS/POST CORS и CORS redirect не переписываются и остаются fail-closed. Эти source-level ограничения ещё не заменяют native-проверку реальных запросов и потери контроля.
 
 ## Известные ограничения
 
@@ -115,7 +129,7 @@
 | Холодные artifact thumbnails | 4/5 вернули 200 через TLS CONNECT на public IP:443. Пятый React thumbnail вернул upstream 404 `text/plain` длиной 10 байт; тот же ответ совпал с прямой проверкой VPS с Chrome UA и без auth/Cloudflare challenge. Считайте его отсутствующим upstream thumbnail/ORB, а не пятым успешным thumbnail. |
 | Публичная граница/TLS | Неавторизованные статусы проверены с Chrome UA на публичном endpoint. Положительный публичный Basic-auth E2E не выполнялся. Python UA через Cloudflare получил HTTP 403 с кодом ошибки Cloudflare 1010; это отдельное client/edge-ограничение и не свидетельство о Chrome-маршруте. |
 
-На момент проверки 2.0.2 оставались непроверенными PDF download, code artifacts, Firefox runtime, clipboard/drop и conditional revalidation по trusted TLS. Последующий 2.0.3 public owner run проверил одну PDF upload/read/download цепочку; code artifacts, native HTML export, Firefox runtime, clipboard/drop и conditional revalidation по trusted TLS по-прежнему не проверялись.
+На момент проверки 2.0.2 оставались непроверенными PDF download, code artifacts, Firefox runtime, clipboard/drop и conditional revalidation по trusted TLS. Последующий 2.0.3 public owner run проверил одну PDF upload/read/download цепочку; code artifacts, native HTML export, Firefox runtime, clipboard/drop и conditional revalidation по trusted TLS по-прежнему не проверялись. Новый Firefox Desktop native proxy/header path остаётся отдельным кандидатом до результата своего browser gate.
 Сообщить об уязвимости: создайте Issue в репозитории, не публикуя пароли, токены, cookies, логи с персональными данными или production-данные.
 
 Лицензия: MIT (см. `LICENSE`).

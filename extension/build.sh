@@ -8,6 +8,10 @@ rm -rf dist && mkdir -p dist
 for b in chrome firefox; do
   mkdir -p "dist/$b"
   for f in $SHARED; do cp "$f" "dist/$b/$f"; done
+  # Firefox's native request/header adapters are not loaded by Chromium.
+  if [ "$b" = "firefox" ]; then
+    cp artifact-firefox.js proxy-firefox.js proxy-block-rules.firefox.json "dist/$b/"
+  fi
   cp "manifest.$b.json" "dist/$b/manifest.json"
   (cd "dist/$b" && zip -qr "../claude-gateway-$b.zip" .)
 done
