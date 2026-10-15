@@ -5,7 +5,7 @@
   "scripts": {
     "test": "node --test tests/gateway*.test.js tests/extension.test.js tests/extension.privacy.test.js tests/artifact-csp.test.js tests/install.test.js tests/fingerprint-runner.test.js && python3 -m unittest discover -s tests -p frontdoor_test.py",
     "test:fingerprint": "sh tests/run-fingerprint-chrome.sh",
-    "test:browser": "npm run build:extension && node --test tests/extension.browser.test.js",
+    "test:browser": "npm run build:extension && node --test tests/extension.browser.test.js tests/extension.local-download.browser.test.js",
     "build:extension": "sh extension/build.sh",
     "lint:firefox": "web-ext lint --self-hosted --source-dir extension/dist/firefox"
   },
