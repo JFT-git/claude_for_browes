@@ -11,7 +11,9 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -271,6 +273,151 @@ class CaddyAuthTests(unittest.TestCase):
             backend.shutdown()
             backend.server_close()
             backend_thread.join(timeout=1)
+
+
+class FrontdoorLoadTests(unittest.TestCase):
+    def test_cold_asset_burst_capacity_rejection_and_recovery(self):
+        self.assertEqual(mux.MAX_CONNECTIONS, 256)
+        hello = client_hello()
+        forwarded, errors, upstreams, clients = [], [], [], []
+        lock, stop = threading.Lock(), threading.Event()
+        backend = socket.socket()
+        backend.bind(("127.0.0.1", 0))
+        backend.listen(512)
+        backend.settimeout(0.1)
+
+        def accept_upstreams():
+            while not stop.is_set():
+                try:
+                    upstream, _ = backend.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                with lock:
+                    upstreams.append(upstream)
+                upstream.settimeout(2)
+                data = bytearray()
+                try:
+                    while len(data) < len(hello) + 128:
+                        chunk = upstream.recv(len(hello) + 128 - len(data))
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                        header, separator, payload = data.partition(b"\r\n")
+                        if separator and len(payload) >= len(hello):
+                            with lock:
+                                if header.startswith(b"PROXY TCP4 ") and payload == hello:
+                                    forwarded.append(True)
+                                else:
+                                    errors.append("incorrect forwarded handshake")
+                            break
+                except OSError:
+                    if not stop.is_set():
+                        errors.append("fixture upstream read failed")
+
+        worker = threading.Thread(target=accept_upstreams)
+        worker.start()
+        process = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="frontdoor-load-fixture-") as directory:
+                ready, report = Path(directory) / "ready", Path(directory) / "reports"
+                # A separate mux process is essential: production owns two
+                # sockets per connection, while the test also owns both peers.
+                # Keeping peers in this parent models the actual 1024-FD limit.
+                shim = textwrap.dedent('''
+                    import importlib.util, pathlib, socket, sys
+                    spec = importlib.util.spec_from_file_location("mux_fixture", sys.argv[1])
+                    mux = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mux)
+                    mux.CADDY = ("127.0.0.1", int(sys.argv[2]))
+                    native_socket, native_diagnostics = socket.socket, mux.Diagnostics
+                    ready, reports = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
+                    class FixtureSocket(native_socket):
+                        def bind(self, address):
+                            super().bind(("127.0.0.1", 0) if address == ("0.0.0.0", 443) else address)
+                        def listen(self, backlog):
+                            super().listen(backlog)
+                            ready.write_text(str(self.getsockname()[1]))
+                    class FixtureDiagnostics(native_diagnostics):
+                        def __init__(self):
+                            def output(line):
+                                with reports.open("a") as target:
+                                    target.write(line + "\\n")
+                            super().__init__(output)
+                        def report_forever(self, stop, interval=30.0):
+                            super().report_forever(stop, interval=0.02)
+                    mux.socket.socket, mux.Diagnostics = FixtureSocket, FixtureDiagnostics
+                    mux.main()
+                ''')
+                env = os.environ.copy()
+                env.update({"PUBLIC_HOST": PUBLIC_HOST, "CONNECT_HOST": CONNECT_HOST, "FRONTDOOR_DIAGNOSTICS": "1"})
+                process = subprocess.Popen([sys.executable, "-c", shim, str(SPEC.origin), str(backend.getsockname()[1]), str(ready), str(report)],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+                def wait_for(predicate, message):
+                    deadline = time.monotonic() + 10
+                    while not predicate():
+                        self.assertIsNone(process.poll(), "mux fixture exited")
+                        if time.monotonic() >= deadline:
+                            self.fail(message)
+                        time.sleep(0.02)
+
+                def reports():
+                    entries = []
+                    for line in report.read_text().splitlines() if report.exists() else []:
+                        try:
+                            entries.append(json.loads(line))
+                        except ValueError:
+                            pass  # The reporter may be writing the final line.
+                    return entries
+
+                def open_client():
+                    client = socket.create_connection(("127.0.0.1", int(ready.read_text())), timeout=3)
+                    clients.append(client)
+                    client.sendall(hello)
+
+                wait_for(ready.exists, "mux fixture did not bind")
+                for _ in range(192):
+                    open_client()
+                wait_for(lambda: len(forwarded) >= 192, "cold asset burst was not forwarded")
+                for _ in range(mux.MAX_CONNECTIONS - 192):
+                    open_client()
+                wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS, "bounded capacity was not reached")
+                wait_for(lambda: any(entry["active"] == mux.MAX_CONNECTIONS for entry in reports()), "capacity peak not reported")
+                proc_fds = Path(f"/proc/{process.pid}/fd")
+                if proc_fds.exists():
+                    self.assertLessEqual(len(list(proc_fds.iterdir())), 2 * mux.MAX_CONNECTIONS + 8)
+                for _ in range(8):
+                    with socket.create_connection(("127.0.0.1", int(ready.read_text())), timeout=3) as excess:
+                        self.assertEqual(excess.recv(1), b"")
+                wait_for(lambda: sum(entry["capacity_rejected"] for entry in reports()) == 8, "over-capacity drops not reported")
+                self.assertEqual(len(forwarded), mux.MAX_CONNECTIONS)
+                # Free all occupied slots, then verify the listener recovers.
+                with lock:
+                    occupied = clients + upstreams[:]
+                    clients.clear()
+                for sock in occupied:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    sock.close()
+                wait_for(lambda: bool(reports()) and reports()[-1]["active"] == 0, "closed slots were not released")
+                for _ in range(16):
+                    open_client()
+                wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS + 16, "listener did not recover after saturation")
+                self.assertFalse(errors)
+                self.assertLessEqual(max(entry["active_peak"] for entry in reports()), mux.MAX_CONNECTIONS)
+        finally:
+            if process is not None:
+                process.terminate()
+                process.communicate(timeout=5)
+            stop.set()
+            backend.close()
+            for sock in clients + upstreams:
+                sock.close()
+            worker.join(timeout=3)
 
 
 class DiagnosticsTests(unittest.TestCase):
