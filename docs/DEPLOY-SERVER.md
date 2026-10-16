@@ -23,7 +23,7 @@ cd /root/claude-browser
 bash install.sh
 ```
 
-When prompted, provide the gateway domain and confirm the public IP that clients will use for CONNECT. Keep `.env` mode `600`; it contains the public hosts and the legacy `COOKIES_KEY`. Cookie jars are sealed with keys derived from each user's gateway password, so `.env` alone does not decrypt them; `COOKIES_KEY` only reads jars written before that change. Save an off-server copy of the separate backup key.
+When prompted, provide the gateway domain and confirm the public IP that clients will use for CONNECT. Keep `.env` mode `600`. Cookie jars are sealed with keys derived from each user's gateway password, so `.env` holds no cookie key. Older installs still have `COOKIES_KEY` for jars written before that change; `install.sh` schedules `admin.sh retire-legacy-key` nightly, which removes the key (and backups holding it) once no Claude session needs it. Save an off-server copy of the separate backup key.
 
 The generated `.env` sets `PUBLIC_HOST` to the HTTPS domain used by Claude requests and `CONNECT_HOST` to the server's public IPv4 address used by artifact tunnels. Caddy serves the domain certificate and requests a separate short-lived Let's Encrypt certificate for `CONNECT_HOST` with HTTP-01. Keep both values correct when moving the server or changing IPs.
 

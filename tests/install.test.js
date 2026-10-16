@@ -26,6 +26,7 @@ case "$*" in
   *validate*) [ ! -f "$FAIL_VALIDATE" ] || { echo "sensitive-hash-and-password" >&2; exit 1; };;
   "compose restart caddy") [ ! -f "\${FAIL_RESTART_CADDY:-/nonexistent}" ] || exit 1;;
   "compose exec -T caddy caddy reload"*) [ ! -f "\${FAIL_RELOAD:-/nonexistent}" ] || exit 1;;
+  *'encryption === "v1"'*) [ ! -f "\${FAIL_GATEWAY_API:-/nonexistent}" ] || exit 1; cat "\${LEGACY_JARS:-/dev/null}";;
   "compose exec -T gateway node -e"*) [ ! -f "\${FAIL_GATEWAY_API:-/nonexistent}" ] || exit 1; printf '{"synthetic":"gateway-status"}';;
 esac
 `);
@@ -47,7 +48,9 @@ function mode(file) { return fs.statSync(file).mode & 0o777; }
 test('fresh install deploys TLS stack, private cookies/backups and cron without revealing backup key', t => {
   const f = fixture(t); const r = f.fresh(); success(r);
   for (const name of ['port443-mux.py', 'privacy.html', 'install-lib.sh', 'admin.sh', 'extension/claude-gateway-chrome.zip', 'extension/claude-gateway-firefox.zip']) assert.ok(fs.existsSync(path.join(f.deploy, name)), name);
-  assert.match(read(path.join(f.deploy, '.env')), /^PUBLIC_HOST=claude.example.com\nCONNECT_HOST=8\.8\.8\.8\nCOOKIES_KEY=[a-f0-9]{64}$/m);
+  assert.match(read(path.join(f.deploy, '.env')), /^PUBLIC_HOST=claude.example.com\nCONNECT_HOST=8\.8\.8\.8$/m);
+  assert.doesNotMatch(read(path.join(f.deploy, '.env')), /COOKIES_KEY/, 'jars use password keys; no shared key on disk');
+  assert.ok(!fs.existsSync(path.join(f.cron, 'claude-gateway-retire-key')));
   assert.equal(mode(path.join(f.deploy, '.env')), 0o600);
   assert.equal(mode(path.join(f.deploy, 'gateway/cookies')), 0o700);
   assert.equal(mode(path.join(f.deploy, 'backups')), 0o700);
@@ -63,7 +66,8 @@ test('fresh install deploys TLS stack, private cookies/backups and cron without 
 });
 test('rerun preserves cookie encryption key, env secrets/admins and exact dotted auth users', t => {
   const f = fixture(t); success(f.fresh());
-  const envPath = path.join(f.deploy, '.env'); const key = read(envPath).match(/COOKIES_KEY=([^\n]+)/)[1];
+  const envPath = path.join(f.deploy, '.env'); const key = 'ab'.repeat(32);
+  fs.appendFileSync(envPath, `COOKIES_KEY=${key}\n`);  // installed before password keys
   fs.appendFileSync(envPath, `CUSTOM_VALUE='$(touch ${f.base}/executed)'\n`);
   let env = read(envPath).replace(`COOKIES_KEY=${key}`, `export COOKIES_KEY = '${key}' # preserved key`).replace('ADMIN_USERS=owner', 'ADMIN_USERS=owner,alice.smith');
   fs.writeFileSync(envPath, env);
@@ -80,6 +84,8 @@ test('rerun preserves cookie encryption key, env secrets/admins and exact dotted
   assert.equal(read(path.join(f.deploy, 'gateway/cookies/alice.smith.json')), oldCookie);
   const users = read(caddy); assert.ok(users.includes(`alice.smith ${hash}`)); assert.ok(users.includes(`aliceXsmith ${hash}`)); assert.ok(!users.includes('obsolete local route'));
   assert.equal((read(f.env.DOCKER_LOG).match(/hash-password/g) || []).length, 1);
+  const retire = read(path.join(f.cron, 'claude-gateway-retire-key'));
+  assert.match(retire, /^23 4 \* \* \* root cd \S+ && BACKUP_KEY_FILE=\S+ \.\/admin\.sh retire-legacy-key >> backups\/retire-key\.log 2>&1 && rm -f \S+\/claude-gateway-retire-key\n$/);
 });
 test('missing encryption key fails closed before deployment writes', t => {
   const f = fixture(t); success(f.fresh());
@@ -150,7 +156,7 @@ test('admin.sh validates every command word, including forced SSH commands', t =
   const sections = status.stdout.split('\n').filter(l => l.startsWith('@@'));
   assert.deepEqual(sections, ['@@gateway', '@@frontdoor', '@@containers', '@@host', '@@config', '@@end']);
   assert.match(status.stdout, /@@gateway\n\{"synthetic":"gateway-status"\}\n/);
-  assert.match(status.stdout, /^users owner$/m); assert.match(status.stdout, /^admins owner$/m); assert.match(status.stdout, /^legacy_key yes$/m);
+  assert.match(status.stdout, /^users owner$/m); assert.match(status.stdout, /^admins owner$/m); assert.match(status.stdout, /^legacy_key no$/m);
   assert.ok(!status.stdout.includes(hash), 'password hashes stay on the server');
   assert.notEqual(admin(['add', 'owner']).status, 0, 'add never resets an existing user');
   assert.notEqual(admin(['reset', 'nobody']).status, 0);
@@ -162,6 +168,31 @@ test('admin.sh validates every command word, including forced SSH commands', t =
   assert.equal(JSON.parse(forced.stdout).user, 'erin');
   const glob = admin(['--ssh'], {SSH_ORIGINAL_COMMAND: 'add *'}); assert.notEqual(glob.status, 0);
   assert.ok(!fs.existsSync(path.join(f.deploy, 'gateway/cookies/*.json')));
+});
+test('retire-legacy-key waits for live sessions, then removes the key everywhere', t => {
+  const f = fixture(t); success(f.fresh());
+  const envPath = path.join(f.deploy, '.env'), jars = path.join(f.deploy, 'gateway/cookies');
+  const admin = () => spawnSync('sh', [path.join(f.deploy, 'admin.sh'), 'retire-legacy-key'], {cwd: f.base, env: {...f.env, LEGACY_JARS: path.join(f.base, 'legacy')}, encoding: 'utf8', timeout: 15000});
+  let r = admin(); success(r); assert.match(r.stdout, /nothing to retire/);
+  fs.appendFileSync(envPath, `COOKIES_KEY=${'cd'.repeat(32)}\n`);
+  for (const name of ['sasha', 'Nika']) fs.writeFileSync(path.join(jars, `${name}.json`), '{"enc":1,"data":"sealed"}');
+  fs.mkdirSync(path.join(f.deploy, 'backups'), {recursive: true});
+  for (const day of ['20261001-031701', '20261002-031701']) fs.writeFileSync(path.join(f.deploy, `backups/state-${day}.tar.gz.enc`), 'old backup with the key');
+  fs.writeFileSync(path.join(f.base, 'legacy'), 'sasha ok\nNika none\n');
+  const before = read(envPath);
+  r = admin(); assert.notEqual(r.status, 0); assert.match(r.stderr, /still sealed with COOKIES_KEY: sasha\./);
+  assert.equal(read(envPath), before); assert.equal(read(path.join(jars, 'Nika.json')), '{"enc":1,"data":"sealed"}');
+  fs.writeFileSync(path.join(f.base, 'legacy'), 'Nika none\n');
+  fs.writeFileSync(f.env.DOCKER_LOG, '');
+  r = admin(); success(r);
+  assert.doesNotMatch(read(envPath), /COOKIES_KEY/); assert.equal(mode(envPath), 0o600);
+  assert.match(read(envPath), /^PUBLIC_HOST=claude\.example\.com$/m);
+  assert.equal(read(path.join(jars, 'Nika.json')), '{"cookies":[]}\n'); assert.equal(mode(path.join(jars, 'Nika.json')), 0o600);
+  assert.equal(read(path.join(jars, 'sasha.json')), '{"enc":1,"data":"sealed"}', 'jars outside the list are untouched');
+  assert.match(read(f.env.DOCKER_LOG), /compose up -d gateway\n/);
+  const backups = fs.readdirSync(path.join(f.deploy, 'backups')).filter(n => n.startsWith('state-'));
+  assert.equal(backups.length, 1); assert.ok(!backups[0].startsWith('state-2026100'), 'only the fresh backup remains');
+  r = admin(); success(r); assert.match(r.stdout, /nothing to retire/);
 });
 test('configure preserves existing users and does not mutate compose', t => {
   const f = fixture(t); success(f.fresh());
@@ -200,6 +231,6 @@ test('removal still revokes tokens and reports failure when Caddy cannot reload 
 test('rerun preserves a valid unpadded base64 cookie key', t => {
   const f = fixture(t); success(f.fresh());
   const envPath = path.join(f.deploy, '.env'), key = Buffer.alloc(32, 255).toString('base64url');
-  fs.writeFileSync(envPath, read(envPath).replace(/^COOKIES_KEY=.*$/m, `COOKIES_KEY=${key}`));
+  fs.appendFileSync(envPath, `COOKIES_KEY=${key}\n`);
   success(f.rerun()); assert.ok(read(envPath).includes(`COOKIES_KEY=${key}\n`));
 });

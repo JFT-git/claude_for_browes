@@ -72,7 +72,6 @@ else
   printf '%s %s\n' "$ADMIN_USER" "$HASH" > "$TMP/users"
   unset ADMIN_PASS ADMIN_PASS2
 fi
-[ -n "$COOKIES_KEY" ] || COOKIES_KEY=$(openssl rand -hex 32)
 TG_TOKEN=''; TG_CHAT=''
 if ! env_has "$ENV_FILE" TELEGRAM_BOT_TOKEN; then
   ask_secret TG_TOKEN 'TELEGRAM_BOT_TOKEN (необязательно; Enter — пропустить)'
@@ -90,12 +89,8 @@ if [ -f "$ENV_FILE" ]; then
   awk '{line=$0;sub(/^[ \t]*(export[ \t]+)?/,"",line);if(line ~ /^(PUBLIC_HOST|CONNECT_HOST)[ \t]*=/) next; print}' "$ENV_FILE" > "$TMP/.env"
 else : > "$TMP/.env"; fi
 printf 'PUBLIC_HOST=%s\nCONNECT_HOST=%s\n' "$DOMAIN" "$CONNECT_IP" >> "$TMP/.env"
-if ! env_has "$ENV_FILE" COOKIES_KEY || [ -z "$(env_get "$ENV_FILE" COOKIES_KEY)" ]; then
-  # Remove an explicitly empty key before appending; dotenv duplicate keys are ambiguous.
-  awk '{line=$0;sub(/^[ \t]*(export[ \t]+)?/,"",line);if(line ~ /^COOKIES_KEY[ \t]*=/) next; print}' "$TMP/.env" > "$TMP/env-next"
-  mv "$TMP/env-next" "$TMP/.env"
-  printf 'COOKIES_KEY=%s\n' "$COOKIES_KEY" >> "$TMP/.env"
-fi
+# Cookie jars are sealed with keys derived from each user's gateway password;
+# no shared COOKIES_KEY is generated. An existing one is kept for old jars.
 env_has "$ENV_FILE" ADMIN_USERS || printf 'ADMIN_USERS=%s\n' "$ADMIN_USER" >> "$TMP/.env"
 env_has "$ENV_FILE" TELEGRAM_BOT_TOKEN || printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TG_TOKEN" >> "$TMP/.env"
 env_has "$ENV_FILE" TELEGRAM_CHAT_ID || printf 'TELEGRAM_CHAT_ID=%s\n' "$TG_CHAT" >> "$TMP/.env"
@@ -128,6 +123,13 @@ if [ -d "$CRON_DIR" ] && [ "$(id -u)" = 0 ]; then
   printf '17 3 * * * root cd %s && BACKUP_KEY_FILE=%s ./backup.sh >> backups/backup.log 2>&1\n' "$DEPLOY_DIR" "$BACKUP_KEY_FILE" > "$CRON_DIR/claude-gateway-backup"
   chmod 644 "$CRON_DIR/claude-gateway-backup"
   ok 'Ежедневный зашифрованный бэкап настроен (03:17)'
+  if [ -n "$COOKIES_KEY" ]; then
+    # Old installs: drop COOKIES_KEY (and backups holding it) once no Claude
+    # session depends on it; the job then removes itself.
+    printf '23 4 * * * root cd %s && BACKUP_KEY_FILE=%s ./admin.sh retire-legacy-key >> backups/retire-key.log 2>&1 && rm -f %s/claude-gateway-retire-key\n' "$DEPLOY_DIR" "$BACKUP_KEY_FILE" "$CRON_DIR" > "$CRON_DIR/claude-gateway-retire-key"
+    chmod 644 "$CRON_DIR/claude-gateway-retire-key"
+    ok 'Старый общий ключ COOKIES_KEY будет удалён автоматически, когда все сессии перейдут на ключи от паролей'
+  fi
 else echo 'cron не настроен: добавьте ежедневный запуск backup.sh вручную.'; fi
 
 echo "DNS: домен $DOMAIN должен указывать на сервер; порт 80 должен быть доступен для выдачи IP-сертификата $CONNECT_IP."

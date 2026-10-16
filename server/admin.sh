@@ -8,6 +8,7 @@
 #   ./admin.sh reset USER         new password for an existing user (same output)
 #   ./admin.sh remove USER        removes the user, their live access and cookie jar
 #   ./admin.sh unban IP
+#   ./admin.sh retire-legacy-key   remove COOKIES_KEY once no Claude session needs it
 #
 # Status output is a sequence of "@@section" lines followed by their data and
 # ends with "@@end". A dedicated SSH key can be limited to these commands:
@@ -29,6 +30,49 @@ fi
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 number() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
 user_exists() { caddy_users Caddyfile | awk -v u="$1" '$1==u {found=1} END {exit !found}'; }
+
+# Jars that still depend on COOKIES_KEY, as "user session" lines. They move to
+# their user's password key on that user's next request.
+legacy_jars() {
+  docker compose exec -T gateway node -e '
+    fetch("http://127.0.0.1:" + (process.env.ADMIN_PORT || 8089) + "/status?history=1", { signal: AbortSignal.timeout(10000) })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error("status")))
+      .then(d => { for (const u of d.users) if (u.encryption === "v1" || (u.encryption === "plain" && u.cookies)) console.log(u.user, u.session); })
+      .catch(() => { process.exitCode = 2; });'
+}
+
+# COOKIES_KEY sits in .env, in the gateway container's stored config and in
+# every backup. Once no jar with a Claude session needs it, remove it from all
+# three: jars without a session are emptied, the gateway is recreated without
+# the key, and backups made with it are replaced by a fresh one.
+retire_legacy_key() {
+  [ -n "$(env_get .env COOKIES_KEY)" ] || { echo 'COOKIES_KEY is not set; nothing to retire.'; return 0; }
+  legacy=$(legacy_jars) || die 'gateway operator API unavailable; is the gateway running a current gateway.js?'
+  waiting=$(printf '%s\n' "$legacy" | awk 'NF && $2 != "none" {printf "%s%s", sep, $1; sep=" "}')
+  [ -z "$waiting" ] || die "Claude sessions still sealed with COOKIES_KEY: $waiting. They move to the password key on the user's next request."
+  umask 077
+  for user in $(printf '%s\n' "$legacy" | awk 'NF {print $1}'); do
+    valid_user "$user" || die 'unexpected user name from the gateway'
+    # No session inside: only non-login cookies are dropped.
+    printf '%s\n' '{"cookies":[]}' > "gateway/cookies/.$user.retire"
+    mv "gateway/cookies/.$user.retire" "gateway/cookies/$user.json"
+    echo "emptied jar without a Claude session: $user"
+  done
+  awk '{line=$0; sub(/^[ \t]*(export[ \t]+)?/, "", line); if (line ~ /^COOKIES_KEY[ \t]*=/) next; print}' .env > .env.retire
+  chmod 600 .env.retire
+  mv .env.retire .env
+  docker compose up -d gateway >&2
+  echo 'COOKIES_KEY removed from .env; gateway recreated without it.'
+  if [ -x ./backup.sh ] && [ -f "${BACKUP_KEY_FILE:-/root/.claude-gateway-backup.key}" ]; then
+    ./backup.sh
+    newest=$(ls -1t backups/state-*.tar.gz.enc | head -n 1)
+    for old in backups/state-*.tar.gz.enc; do
+      [ "$old" = "$newest" ] && continue
+      if command -v shred >/dev/null 2>&1; then shred -u "$old"; else rm -f "$old"; fi
+    done
+    echo "older backups (they held COOKIES_KEY) deleted; kept $newest. Copies made with BACKUP_REMOTE must be deleted there."
+  fi
+}
 
 status() {
   echo '@@gateway'
@@ -53,6 +97,7 @@ status() {
   printf 'public_host %s\n' "$(env_get .env PUBLIC_HOST)"
   printf 'frontdoor_diagnostics %s\n' "$(env_get .env FRONTDOOR_DIAGNOSTICS)"
   printf 'legacy_key %s\n' "$( [ -n "$(env_get .env COOKIES_KEY)" ] && echo yes || echo no)"
+  printf 'retire_scheduled %s\n' "$( [ -f "${CRON_DIR:-/etc/cron.d}/claude-gateway-retire-key" ] && echo yes || echo no)"
   printf 'backups %s\n' "$(ls -1 backups/state-*.tar.gz.enc 2>/dev/null | wc -l | tr -d ' ')"
   printf 'backup_latest %s\n' "$(ls -1t backups/state-*.tar.gz.enc 2>/dev/null | head -n 1 | sed 's|.*/state-||; s|\.tar\.gz\.enc$||')"
   echo '@@end'
@@ -84,6 +129,9 @@ case "$command" in
     case "${2:-}" in ''|*[!0-9a-fA-F:.]*) die 'invalid IP';; esac
     [ "${#2}" -le 45 ] || die 'invalid IP'
     gateway_admin POST "/bans/$2/clear"; echo;;
+  retire-legacy-key)
+    [ -z "${2:-}" ] || die 'retire-legacy-key takes no arguments'
+    retire_legacy_key;;
   *)
-    die 'usage: admin.sh status [MINUTES] | watch [SECONDS] | add USER | reset USER | remove USER | unban IP';;
+    die 'usage: admin.sh status [MINUTES] | watch [SECONDS] | add USER | reset USER | remove USER | unban IP | retire-legacy-key';;
 esac
