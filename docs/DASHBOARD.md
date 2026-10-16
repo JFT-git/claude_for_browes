@@ -52,6 +52,7 @@ cd /root/claude-browser
 ./admin.sh reset alice
 ./admin.sh remove alice
 ./admin.sh unban 198.51.100.7
+./admin.sh retire-legacy-key   # удалить старый общий ключ, когда он больше не нужен
 ```
 
 ## Безопасность панели

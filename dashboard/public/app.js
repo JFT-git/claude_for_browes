@@ -113,6 +113,8 @@
     return (state.history.rows || []).filter(r => r[0] <= end && r[0] > end - minutes * 60000).map(r => Number(r[idx]) || 0);
   }
   const sum = a => a.reduce((x, y) => x + y, 0);
+  // Jars that still hold cookies under COOKIES_KEY or in plain text.
+  const legacyUsers = g => (g ? g.users : []).filter(u => (u.encryption === "v1" || u.encryption === "plain") && u.cookies);
 
   // ------------------------------------------------------------ charts ----
   function niceMax(v) {
@@ -231,7 +233,7 @@
     const gw = state.containers.find(x => x.name === "gateway");
     if (gw && gw.memLimit && gw.memUsed / gw.memLimit > 0.8) out.push(["warn", "Шлюзу не хватает памяти:", " " + bytes(gw.memUsed) + " из " + bytes(gw.memLimit) + "."]);
     if (g) {
-      const legacy = g.users.filter(u => u.encryption === "v1" || u.encryption === "plain").map(u => u.user);
+      const legacy = legacyUsers(g).map(u => u.user);
       if (legacy.length) out.push(["warn", "Cookie на старом общем ключе: " + legacy.join(", ") + ".", " Перешифруются ключом от пароля при следующем запросе пользователя."]);
       const expired = g.users.filter(u => u.session === "expired").map(u => u.user);
       if (expired.length) out.push(["warn", "Сессия Claude истекла: " + expired.join(", ") + ".", " Пользователю нужно снова войти в Claude."]);
@@ -288,7 +290,8 @@
       const u = info.get(name) || {};
       const hasLogin = configured.includes(name);
       const session = { ok: ["ok", "активна"], expired: ["warn", "истекла"], none: ["", "не входил"] }[u.session] || ["", "—"];
-      const enc = { v2: ["ok", "зашифрованы паролем"], v1: ["warn", "старый общий ключ"], plain: ["bad", "без шифрования"] }[u.encryption] || ["", "—"];
+      const empty = u.encryption && u.encryption !== "v2" && !u.cookies;
+      const enc = empty ? ["", "пусто"] : { v2: ["ok", "зашифрованы паролем"], v1: ["warn", "старый общий ключ"], plain: ["bad", "без шифрования"] }[u.encryption] || ["", "—"];
       const a = u.active || {};
       const live = (a.requests || 0) + (a.websockets || 0) + (a.tunnels || 0);
       const recent = u.lastSeen && state.now - Date.parse(u.lastSeen) < 5 * 60000;
@@ -298,7 +301,7 @@
         h("td", { "data-label": "Пользователь" }, h("span", { class: "name", text: name }), admins.includes(name) ? h("span", { class: "badge", text: "админ" }) : null,
           !hasLogin ? h("span", { class: "badge", text: "нет входа в шлюз", title: "Файл cookie есть, а пароля в Caddyfile нет" }) : null),
         h("td", { "data-label": "Сессия Claude" }, h("span", { class: "pill " + session[0], text: session[1] })),
-        h("td", { "data-label": "Cookie на диске" }, h("span", { class: "pill " + enc[0], text: enc[1], title: u.unlocked ? "Ключ сейчас в памяти шлюза" : "Ключа нет в памяти: файл не расшифровать без пароля" })),
+        h("td", { "data-label": "Cookie на диске" }, h("span", { class: "pill " + enc[0], text: enc[1], title: empty ? "В файле нет cookie: пользователь ещё не входил в Claude" : u.unlocked ? "Ключ сейчас в памяти шлюза" : "Ключа нет в памяти: файл не расшифровать без пароля" })),
         h("td", { "data-label": "Сейчас", title: detail }, h("span", {}, h("span", { class: "pill " + now[0], text: now[1] }), detail ? h("span", { class: "muted", text: " " + detail }) : null)),
         h("td", { "data-label": "Был активен", class: u.lastSeen ? "" : "muted", text: u.lastSeen ? ago(u.lastSeen, state.now) : "—",
           title: u.lastSeen ? new Date(u.lastSeen).toLocaleString("ru-RU") : "Запросов не было с запуска шлюза" }),
@@ -350,13 +353,21 @@
     const g = state.gateway, cfg = state.config || {};
     const facts = [];
     if (g) {
-      const j = g.encryption.jars, total = j.v2 + j.v1 + j.plain;
-      facts.push(["Cookie Claude на диске", total ? j.v2 + " из " + total + " зашифрованы ключом от пароля пользователя" + (j.v1 + j.plain ? "; остальные перейдут при следующем входе" : "") : "файлов пока нет"]);
+      const legacy = legacyUsers(g).map(u => u.user);
+      const empty = g.users.filter(u => u.encryption !== "v2" && !u.cookies).length;
+      facts.push(["Cookie Claude на диске", g.users.length ? g.encryption.jars.v2 + " " + plural(g.encryption.jars.v2, "файл зашифрован", "файла зашифрованы", "файлов зашифровано") + " ключом от пароля"
+        + (legacy.length ? "; на старом ключе: " + legacy.join(", ") + " — перейдут при следующем входе" : "") + (empty ? "; пустых: " + empty : "") : "файлов пока нет"]);
       facts.push(["Как шифруются", "AES-256-GCM, ключ из пароля через " + g.encryption.kdf + ". Без пароля файлы, бэкапы и снимки диска не расшифровать."]);
       facts.push(["Ключи в памяти", num(g.now.jarKeysInMemory) + " · стираются через " + g.encryption.keyIdleMinutes + " мин без запросов"]);
       facts.push(["Маршрут CONNECT", g.now.connectReady ? "готов · токенов: " + num(g.now.proxySessions) : "не готов"]);
     }
-    if (cfg.legacy_key) facts.push(["Старый ключ COOKIES_KEY", cfg.legacy_key === "yes" ? (g && g.encryption.jars.v1 ? "нужен для " + g.encryption.jars.v1 + " старых файлов" : "в .env, новым файлам не нужен") : "не задан"]);
+    if (cfg.legacy_key) {
+      const waiting = legacyUsers(g).filter(u => u.session !== "none").map(u => u.user);
+      const auto = cfg.retire_scheduled === "yes" ? "удалится сам ночью" : "удалить: ./admin.sh retire-legacy-key";
+      facts.push(["Старый ключ COOKIES_KEY", cfg.legacy_key !== "yes" ? "не используется"
+        : waiting.length ? "нужен для сессий: " + waiting.join(", ") + " · " + (cfg.retire_scheduled === "yes" ? "удалится сам после их входа" : "после их входа: ./admin.sh retire-legacy-key")
+        : "больше не нужен · " + auto]);
+    }
     if (cfg.backups !== undefined) {
       const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/.exec(cfg.backup_latest || "");
       facts.push(["Бэкапы", (Number(cfg.backups) ? num(cfg.backups) + " шт." : "нет") + (m ? " · последний " + m[3] + "." + m[2] + "." + m[1] + " " + m[4] + ":" + m[5] : "")]);
