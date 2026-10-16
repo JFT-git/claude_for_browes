@@ -1,5 +1,7 @@
 {
-    admin off
+    # Admin API only on a socket inside the container (tmpfs, root-only), so
+    # add-user.sh/remove-user.sh can reload users without dropping connections.
+    admin unix//run/caddy/admin.sock
     # Runtime errors can include complete requests even without access logging.
     # Keep diagnostics, but never persist magic-link URLs or request headers.
     log default {

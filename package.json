@@ -3,7 +3,8 @@
   "private": true,
   "description": "Gateway + browser extension (Chrome/Firefox) for claude.ai",
   "scripts": {
-    "test": "node --test tests/gateway*.test.js tests/extension.test.js tests/extension.privacy.test.js tests/artifact-csp.test.js tests/artifact-cors.test.js tests/artifact-firefox.test.js tests/firefox-proxy.test.js tests/install.test.js tests/fingerprint-runner.test.js && python3 -m unittest discover -s tests -p '*_test.py'",
+    "dashboard": "node dashboard/dashboard.js",
+    "test": "node --test tests/gateway*.test.js tests/extension.test.js tests/extension.privacy.test.js tests/artifact-csp.test.js tests/artifact-cors.test.js tests/artifact-firefox.test.js tests/firefox-proxy.test.js tests/install.test.js tests/dashboard.test.js tests/fingerprint-runner.test.js && python3 -m unittest discover -s tests -p '*_test.py'",
     "test:fingerprint": "sh tests/run-fingerprint-chrome.sh",
     "test:browser": "npm run build:extension && node --test tests/extension.browser.test.js tests/extension.local-download.browser.test.js",
     "test:firefox": "npm run build:extension && node --test tests/firefox.browser.test.js tests/firefox-scoped.browser.test.js",

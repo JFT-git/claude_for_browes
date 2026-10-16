@@ -1,6 +1,6 @@
 # Deploy the server
 
-The server has three containers: a TLS-only front door, the application gateway, and Caddy. Public TCP 443 reaches the front door; TCP 80 reaches Caddy for Let's Encrypt HTTP-01 certificate issuance. Caddy requests a short-lived certificate for the public IP and renews it automatically. The gateway listeners on 8088 and 8443 stay inside the Docker network.
+The server has three containers: a TLS-only front door, the application gateway, and Caddy. Public TCP 443 reaches the front door; TCP 80 reaches Caddy for Let's Encrypt HTTP-01 certificate issuance. Caddy requests a short-lived certificate for the public IP and renews it automatically. The gateway listeners on 8088 and 8443 stay inside the Docker network; its operator API on 8089 listens only on the gateway container's own loopback interface and is reached through `docker compose exec` (`admin.sh`).
 
 ## Requirements
 
@@ -23,7 +23,7 @@ cd /root/claude-browser
 bash install.sh
 ```
 
-When prompted, provide the gateway domain and confirm the public IP that clients will use for CONNECT. Keep `.env` mode `600`; it contains `COOKIES_KEY` and the public hosts. Save an off-server copy of the cookie encryption key and the separate backup key.
+When prompted, provide the gateway domain and confirm the public IP that clients will use for CONNECT. Keep `.env` mode `600`; it contains the public hosts and the legacy `COOKIES_KEY`. Cookie jars are sealed with keys derived from each user's gateway password, so `.env` alone does not decrypt them; `COOKIES_KEY` only reads jars written before that change. Save an off-server copy of the separate backup key.
 
 The generated `.env` sets `PUBLIC_HOST` to the HTTPS domain used by Claude requests and `CONNECT_HOST` to the server's public IPv4 address used by artifact tunnels. Caddy serves the domain certificate and requests a separate short-lived Let's Encrypt certificate for `CONNECT_HOST` with HTTP-01. Keep both values correct when moving the server or changing IPs.
 
@@ -82,11 +82,12 @@ Run management commands from the deploy directory:
 ```sh
 ./add-user.sh alice
 ./remove-user.sh alice
+./admin.sh status
 ```
 
 The first command generates a gateway password and prints it once. The user installs the current Chromium package from `https://<domain>/__ext/`, creates a dedicated browser profile, enters the gateway host/user/password, and completes Claude sign-in. Firefox 140+ packages exist, but secure artifact CONNECT is disabled there; do not offer Firefox as a full-parity client.
 
-Removing a user restarts the gateway and revokes all short-lived proxy sessions. Other users will need to reconnect; their cookie files must remain intact. Check the current script behavior before production operations and make a backup first.
+Both scripts reload Caddy through its admin socket inside the container (`/run/caddy/admin.sock`, tmpfs) instead of restarting it. Removal revokes only that user's proxy sessions, tunnels and WebSockets through the gateway's loopback-only operator API and deletes their cookie jar; other users stay connected. Resetting a password ends the user's tunnels and WebSockets; their Claude session survives only while the gateway still holds their jar key (activity within the last hour). For a dashboard with users and load, see [DASHBOARD.md](DASHBOARD.md).
 
 ## Operations and recovery
 

@@ -17,11 +17,16 @@ function fixture(t) {
   fs.writeFileSync(path.join(repo, 'gateway/gateway.js'), '// fixture\n');
   fs.writeFileSync(path.join(repo, 'extension/build.sh'), '#!/bin/sh\nmkdir -p extension/dist\ntouch extension/dist/claude-gateway-chrome.zip extension/dist/claude-gateway-firefox.zip\n');
   fs.writeFileSync(path.join(bin, 'docker'), `#!/bin/sh
-printf '%s\\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
-  *hash-password*) printf '%s\\n' '${hash}';;
+  "compose exec -T gateway node -e"*) printf 'compose exec -T gateway node %s %s\\n' "$(eval "printf '%s' \\"\\\${$(($#-1))}\\"")" "$(eval "printf '%s' \\"\\\${$#}\\"")" >> "$DOCKER_LOG";;
+  *) printf '%s\\n' "$*" >> "$DOCKER_LOG";;
+esac
+case "$*" in
+  *hash-password*) cat > "$HASH_STDIN"; printf '%s\\n' '${hash}';;
   *validate*) [ ! -f "$FAIL_VALIDATE" ] || { echo "sensitive-hash-and-password" >&2; exit 1; };;
   "compose restart caddy") [ ! -f "\${FAIL_RESTART_CADDY:-/nonexistent}" ] || exit 1;;
+  "compose exec -T caddy caddy reload"*) [ ! -f "\${FAIL_RELOAD:-/nonexistent}" ] || exit 1;;
+  "compose exec -T gateway node -e"*) [ ! -f "\${FAIL_GATEWAY_API:-/nonexistent}" ] || exit 1; printf '{"synthetic":"gateway-status"}';;
 esac
 `);
   fs.writeFileSync(path.join(bin, 'curl'), '#!/bin/sh\nprintf 401\n');
@@ -29,7 +34,7 @@ esac
   fs.writeFileSync(path.join(bin, 'scp'), '#!/bin/sh\necho forbidden-scp >&2\nexit 99\n');
   fs.writeFileSync(path.join(bin, 'id'), '#!/bin/sh\nprintf 0\n');
   for (const file of fs.readdirSync(bin)) fs.chmodSync(path.join(bin, file), 0o755);
-  const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, BACKUP_KEY_FILE: path.join(base, 'backup.key'), CRON_DIR: cron, DOCKER_LOG: path.join(base, 'docker.log'), FAIL_VALIDATE: path.join(base, 'fail-validate')};
+  const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, BACKUP_KEY_FILE: path.join(base, 'backup.key'), CRON_DIR: cron, DOCKER_LOG: path.join(base, 'docker.log'), FAIL_VALIDATE: path.join(base, 'fail-validate'), HASH_STDIN: path.join(base, 'hash-stdin')};
   delete env.COOKIES_KEY; delete env.BACKUP_REMOTE;
   const run = (script, input = '', args = [], cwd = repo) => spawnSync('bash', [script, ...args], {cwd, env, input, encoding: 'utf8', timeout: 15000});
   const fresh = () => run('install.sh', `${deploy}\nclaude.example.com\n8.8.8.8\nowner\npassword123456\npassword123456\n\ny\n`);
@@ -41,7 +46,7 @@ function read(file) { return fs.readFileSync(file, 'utf8'); }
 function mode(file) { return fs.statSync(file).mode & 0o777; }
 test('fresh install deploys TLS stack, private cookies/backups and cron without revealing backup key', t => {
   const f = fixture(t); const r = f.fresh(); success(r);
-  for (const name of ['port443-mux.py', 'privacy.html', 'install-lib.sh', 'extension/claude-gateway-chrome.zip', 'extension/claude-gateway-firefox.zip']) assert.ok(fs.existsSync(path.join(f.deploy, name)), name);
+  for (const name of ['port443-mux.py', 'privacy.html', 'install-lib.sh', 'admin.sh', 'extension/claude-gateway-chrome.zip', 'extension/claude-gateway-firefox.zip']) assert.ok(fs.existsSync(path.join(f.deploy, name)), name);
   assert.match(read(path.join(f.deploy, '.env')), /^PUBLIC_HOST=claude.example.com\nCONNECT_HOST=8\.8\.8\.8\nCOOKIES_KEY=[a-f0-9]{64}$/m);
   assert.equal(mode(path.join(f.deploy, '.env')), 0o600);
   assert.equal(mode(path.join(f.deploy, 'gateway/cookies')), 0o700);
@@ -89,21 +94,74 @@ test('invalid Caddy candidate leaves existing deployment untouched', t => {
   fs.writeFileSync(f.env.FAIL_VALIDATE, 'fail');
   const r = f.rerun(); assert.notEqual(r.status, 0); assert.equal(read(path.join(f.deploy, 'Caddyfile')), before); assert.ok(!(r.stdout + r.stderr).includes('sensitive-hash-and-password'));
 });
-test('user changes match exact usernames and removal revokes all minted tokens after Caddy restart', t => {
+test('user changes reload Caddy in place; removal revokes only that user and deletes the jar', t => {
   const f = fixture(t); success(f.fresh());
   const runUser = (name, args) => f.run(path.join(f.deploy, name), '', args, f.deploy);
+  const caddyPath = path.join(f.deploy, 'Caddyfile'), inode = fs.statSync(caddyPath).ino;
   success(runUser('add-user.sh', ['alice.smith', 'password123456']));
   success(runUser('add-user.sh', ['aliceXsmith', 'password123456']));
+  assert.equal(fs.statSync(caddyPath).ino, inode, 'the bind-mounted Caddyfile keeps its inode');
+  assert.equal(mode(caddyPath), 0o600);
+  assert.ok(!fs.existsSync(path.join(f.deploy, '.Caddyfile.prev')));
   assert.notEqual(runUser('remove-user.sh', ['alice.smit.']).status, 0);
-  const r = runUser('remove-user.sh', ['alice.smith']); success(r); assert.match(r.stdout, /All users must reconnect/);
-  const caddy = read(path.join(f.deploy, 'Caddyfile')); assert.ok(!caddy.includes(`alice.smith ${hash}`)); assert.ok(caddy.includes(`aliceXsmith ${hash}`));
-  assert.match(read(f.env.DOCKER_LOG), /compose restart caddy\ncompose restart gateway\n$/);
+  fs.writeFileSync(f.env.DOCKER_LOG, '');
+  const r = runUser('remove-user.sh', ['alice.smith']); success(r); assert.match(r.stdout, /other users stay connected/);
+  const caddy = read(caddyPath); assert.ok(!caddy.includes(`alice.smith ${hash}`)); assert.ok(caddy.includes(`aliceXsmith ${hash}`));
+  const log = read(f.env.DOCKER_LOG);
+  assert.match(log, /compose exec -T caddy caddy reload --config \/etc\/caddy\/Caddyfile --adapter caddyfile\ncompose exec -T gateway node POST \/users\/alice\.smith\/revoke\?forget=1\n$/);
+  assert.doesNotMatch(log, /compose restart/);
+  assert.ok(!fs.existsSync(path.join(f.deploy, 'gateway/cookies/alice.smith.json')), 'jar deleted');
+  assert.ok(!fs.existsSync(path.join(f.deploy, 'gateway/cookies/.removed')), 'no archived session');
+  assert.ok(fs.existsSync(path.join(f.deploy, 'gateway/cookies/aliceXsmith.json')));
   for (const invalid of ['.', '..', 'a/b', 'a'.repeat(65), 'a b']) {
     assert.notEqual(runUser('add-user.sh', [invalid, 'password123456']).status, 0, invalid);
     assert.notEqual(runUser('remove-user.sh', [invalid]).status, 0, invalid);
   }
-  fs.writeFileSync(f.env.FAIL_VALIDATE, 'fail'); const before = read(path.join(f.deploy, 'Caddyfile'));
-  assert.notEqual(runUser('remove-user.sh', ['aliceXsmith']).status, 0); assert.equal(read(path.join(f.deploy, 'Caddyfile')), before);
+  fs.writeFileSync(f.env.FAIL_VALIDATE, 'fail'); const before = read(caddyPath);
+  assert.notEqual(runUser('remove-user.sh', ['aliceXsmith']).status, 0); assert.equal(read(caddyPath), before);
+});
+test('passwords reach Caddy only on stdin; a reset revokes the old password holder', t => {
+  const f = fixture(t); success(f.fresh());
+  assert.ok(!read(f.env.DOCKER_LOG).includes('password123456'), 'install hashed on a command line');
+  const run = args => f.run(path.join(f.deploy, 'add-user.sh'), '', args, f.deploy);
+  let r = run(['--json', 'bob']); success(r);
+  const created = JSON.parse(r.stdout);
+  assert.deepEqual([created.user, created.reset], ['bob', false]); assert.match(created.password, /^[a-f0-9]{24}$/);
+  assert.equal(read(f.env.HASH_STDIN), created.password + '\n');
+  assert.ok(!read(f.env.DOCKER_LOG).includes(created.password));
+  fs.writeFileSync(f.env.DOCKER_LOG, '');
+  r = run(['bob', 'another-password-1']); success(r); assert.match(r.stdout, /Password changed: bob/);
+  assert.match(read(f.env.DOCKER_LOG), /compose exec -T gateway node POST \/users\/bob\/revoke\n/);
+  assert.ok(!read(f.env.DOCKER_LOG).includes('another-password-1'));
+  const caddy = read(path.join(f.deploy, 'Caddyfile')); assert.equal(caddy.split('\n').filter(l => /^\s+bob /.test(l)).length, 1);
+});
+test('without the gateway operator API removal falls back to a gateway restart', t => {
+  const f = fixture(t); success(f.fresh());
+  success(f.run(path.join(f.deploy, 'add-user.sh'), '', ['carol', 'password123456'], f.deploy));
+  f.env.FAIL_GATEWAY_API = path.join(f.base, 'fail-api'); fs.writeFileSync(f.env.FAIL_GATEWAY_API, 'fail');
+  fs.writeFileSync(f.env.DOCKER_LOG, '');
+  success(f.run(path.join(f.deploy, 'remove-user.sh'), '', ['carol'], f.deploy));
+  assert.match(read(f.env.DOCKER_LOG), /revoke\?forget=1\ncompose restart gateway\n$/);
+});
+test('admin.sh validates every command word, including forced SSH commands', t => {
+  const f = fixture(t); success(f.fresh());
+  const admin = (args, extra = {}) => spawnSync('sh', [path.join(f.deploy, 'admin.sh'), ...args], {cwd: f.base, env: {...f.env, ...extra}, encoding: 'utf8', timeout: 15000});
+  const status = admin(['status', '5']); success(status);
+  const sections = status.stdout.split('\n').filter(l => l.startsWith('@@'));
+  assert.deepEqual(sections, ['@@gateway', '@@frontdoor', '@@containers', '@@host', '@@config', '@@end']);
+  assert.match(status.stdout, /@@gateway\n\{"synthetic":"gateway-status"\}\n/);
+  assert.match(status.stdout, /^users owner$/m); assert.match(status.stdout, /^admins owner$/m); assert.match(status.stdout, /^legacy_key yes$/m);
+  assert.ok(!status.stdout.includes(hash), 'password hashes stay on the server');
+  assert.notEqual(admin(['add', 'owner']).status, 0, 'add never resets an existing user');
+  assert.notEqual(admin(['reset', 'nobody']).status, 0);
+  const added = admin(['add', 'dave']); success(added); assert.equal(JSON.parse(added.stdout).user, 'dave');
+  for (const bad of ['status 0', 'status 5;id', 'add da;ve', 'add ../x', 'unban 1.2.3.4;id', 'unban', 'watch 1', 'shell', 'admin.sh remove nobody']) {
+    assert.notEqual(admin(['--ssh'], {SSH_ORIGINAL_COMMAND: bad}).status, 0, bad);
+  }
+  const forced = admin(['--ssh'], {SSH_ORIGINAL_COMMAND: '/srv/elsewhere/admin.sh add erin'}); success(forced);
+  assert.equal(JSON.parse(forced.stdout).user, 'erin');
+  const glob = admin(['--ssh'], {SSH_ORIGINAL_COMMAND: 'add *'}); assert.notEqual(glob.status, 0);
+  assert.ok(!fs.existsSync(path.join(f.deploy, 'gateway/cookies/*.json')));
 });
 test('configure preserves existing users and does not mutate compose', t => {
   const f = fixture(t); success(f.fresh());
@@ -129,12 +187,15 @@ test('host validators reject newlines, private IPs and malformed labels', t => {
   }
 });
 
-test('removal still attempts token revocation when Caddy restart fails', t => {
+test('removal still revokes tokens and reports failure when Caddy cannot reload or restart', t => {
   const f = fixture(t); success(f.fresh());
   success(f.run(path.join(f.deploy, 'add-user.sh'), '', ['alice.smith', 'password123456'], f.deploy));
-  f.env.FAIL_RESTART_CADDY = path.join(f.base, 'fail-caddy-restart'); fs.writeFileSync(f.env.FAIL_RESTART_CADDY, 'fail');
+  for (const name of ['FAIL_RELOAD', 'FAIL_RESTART_CADDY']) { f.env[name] = path.join(f.base, name); fs.writeFileSync(f.env[name], 'fail'); }
+  fs.writeFileSync(f.env.DOCKER_LOG, '');
   const r = f.run(path.join(f.deploy, 'remove-user.sh'), '', ['alice.smith'], f.deploy);
-  assert.notEqual(r.status, 0); assert.match(read(f.env.DOCKER_LOG), /compose restart caddy\ncompose restart gateway\n$/);
+  assert.notEqual(r.status, 0);
+  assert.match(read(f.env.DOCKER_LOG), /caddy reload[^\n]*\ncompose restart caddy\ncompose exec -T gateway node POST \/users\/alice\.smith\/revoke\?forget=1\n$/);
+  assert.ok(!fs.existsSync(path.join(f.deploy, 'gateway/cookies/alice.smith.json')));
 });
 test('rerun preserves a valid unpadded base64 cookie key', t => {
   const f = fixture(t); success(f.fresh());

@@ -122,7 +122,9 @@ class CaddyLogTests(unittest.TestCase):
                     port = reservation.getsockname()[1]
                     reservation.close()
                     config = Path(directory) / "Caddyfile"
-                    config.write_text((global_config if filtered else "{\n admin off\n}\n") +
+                    # The admin socket lives in tmpfs in production; keep it in the fixture.
+                    config.write_text((global_config.replace("unix//run/caddy/admin.sock", f"unix/{directory}/admin.sock")
+                                       if filtered else "{\n admin off\n}\n") +
                         f"http://127.0.0.1:{port} {{\n reverse_proxy 127.0.0.1:{unavailable.getsockname()[1]} {{\n"
                         " transport http {\n dial_timeout 100ms\n }\n }\n}\n")
                     env = os.environ.copy()
@@ -172,6 +174,7 @@ class CaddyLogTests(unittest.TestCase):
 class CaddyAuthTests(unittest.TestCase):
     def test_template_basic_auth_controls_gateway_identity_and_public_assets(self):
         requests = []
+        authorizations = []
 
         class GatewayFixture(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -185,6 +188,7 @@ class CaddyAuthTests(unittest.TestCase):
                 if self.path.startswith("/api/ws/") and self.headers.get("X-Client-IP"):
                     user = "SPOOFED_CLIENT_IP"
                 requests.append({"path": self.path, "method": self.command, "user": user})
+                authorizations.append(self.headers.get("Authorization", ""))
                 body = json.dumps({"user": user}).encode()
                 self.send_response(401 if self.path == "/__authfail" else 200)
                 self.send_header("Content-Type", "application/json")
@@ -216,6 +220,7 @@ class CaddyAuthTests(unittest.TestCase):
                 rendered = rendered.replace("__BASIC_AUTH_USER__ __BASIC_AUTH_HASH__",
                     f"fixture-alice {hashed}\n            fixture-bob {hashed}")
                 rendered = rendered.replace("gateway:8088", f"127.0.0.1:{backend.server_port}")
+                rendered = rendered.replace("unix//run/caddy/admin.sock", f"unix/{directory}/admin.sock")
                 config = Path(directory) / "Caddyfile"
                 config.write_text(rendered)
                 env = os.environ.copy()
@@ -255,10 +260,13 @@ class CaddyAuthTests(unittest.TestCase):
                             [("/__ban-check", "GET"), ("/__authfail", "POST")])
                     for user, spoof in (("fixture-alice", "fixture-bob"), ("fixture-bob", "fixture-alice")):
                         requests.clear()
+                        authorizations.clear()
                         status, _, body = request("/__health", {"Authorization": basic(user), "X-Remote-User": spoof})
                         self.assertEqual(status, 200)
                         self.assertEqual(json.loads(body)["user"], user)
                         self.assertEqual(requests[-1], {"path": "/__health", "method": "GET", "user": user})
+                        # The gateway derives the user's cookie-jar key from these verified credentials.
+                        self.assertEqual(authorizations[-1], basic(user))
                     for path in ("/p/assets-proxy.anthropic.com/fixture.js", "/p/assets.claude.ai/fixture.js"):
                         requests.clear()
                         status, _, body = request(path, {"X-Remote-User": "fixture-bob"})
@@ -286,6 +294,16 @@ class CaddyAuthTests(unittest.TestCase):
                     requests.clear()
                     status, _, body = request("/api/ws/fixture", {**{k: v for k, v in upgrade.items() if k != "X-Client-IP"}, "Authorization": basic("fixture-alice")})
                     self.assertEqual((status, json.loads(body)["user"]), (200, "fixture-alice"))
+                    # remove-user.sh: rewrite the file in place and reload over the admin
+                    # socket. The removed user is refused at once; Caddy keeps running.
+                    config.write_text("\n".join(line for line in config.read_text().splitlines()
+                                                if not line.strip().startswith("fixture-bob ")) + "\n")
+                    reload = subprocess.run([CADDY_BIN, "reload", "--config", str(config), "--adapter", "caddyfile"],
+                        env=env, cwd=directory, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(reload.returncode, 0, "reload over the admin socket failed")
+                    self.assertIsNone(process.poll())
+                    self.assertEqual(request("/__health", {"Authorization": basic("fixture-bob")})[0], 401)
+                    self.assertEqual(request("/__health", {"Authorization": basic("fixture-alice")})[0], 200)
                 finally:
                     process.terminate()
                     process.communicate(timeout=3)
