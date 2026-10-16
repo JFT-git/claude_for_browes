@@ -19,7 +19,7 @@ if (typeof importScripts === "function") {
 }
 const extensionAPI = typeof browser !== "undefined" && browser.proxy?.onRequest ? browser : chrome;
 const { DEPENDENCY_HOSTS, ARTIFACT_DOMAINS, protectedHost, protectedPattern: PROTECTED_PATTERN, RESOURCE_TYPES } = GatewayPrivacy;
-const PROXY_ALLOW_IDS = [PROXY_ALLOW_ID, ...DEPENDENCY_HOSTS.map((_, index) => 2010 + index)];
+const PROXY_ALLOW_IDS = GatewayPrivacy.buildProxyAllowRules().map(rule => rule.id);
 const PROXY_WARMUP_ALLOW_ID = 2020, PROXY_WARMUP_HEADERS_ID = 2021;
 const PROXY_SESSION_RULE_IDS = [...PROXY_ALLOW_IDS, PROXY_WARMUP_ALLOW_ID, PROXY_WARMUP_HEADERS_ID];
 const PROXY_WARMUP_URL = "https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js";
@@ -105,7 +105,7 @@ let operationQueue = Promise.resolve();
 const authAttempts = new Map();
 const FIREFOX = typeof browser !== "undefined" && !!browser.proxy?.onRequest;
 let proxyReason = "";
-const PROXY_FILTER = ["*://*.claudeusercontent.com/*", "*://*.claudemcpcontent.com/*", ...DEPENDENCY_HOSTS.map(host => "*://" + host + "/*")];
+const PROXY_FILTER = [...ARTIFACT_DOMAINS, ...GatewayPrivacy.CHALLENGE_DOMAINS].map(domain => "*://*." + domain + "/*").concat(DEPENDENCY_HOSTS.map(host => "*://" + host + "/*"));
 const proxyFirefox = FIREFOX && typeof GatewayProxyFirefox !== "undefined" ? GatewayProxyFirefox.create({
   browser, protectedHost, artifactHost: GatewayPrivacy.artifactHost, upstreamHost: host => GatewayPrivacy.UPSTREAM_HOSTS.includes(host), filter: PROXY_FILTER, warmupUrl: PROXY_WARMUP_URL, isExtensionRequest: isExtensionProxyRequest
 }) : null;

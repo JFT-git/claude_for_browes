@@ -319,7 +319,8 @@ test("PDF downloads preserve exact binary bytes, attachment metadata and HEAD le
     assert.deepEqual(response.body, pdfFixture);
     assert.equal(response.headers["content-length"], String(pdfFixture.length));
     assert.equal(response.headers["content-disposition"], pdfDisposition);
-    assert.equal(response.headers["cache-control"], "private, no-store");
+    assert.equal(response.headers["cache-control"], "private, no-store, no-transform");
+    assert.equal(response.headers["cloudflare-cdn-cache-control"], "no-store");
     const head = await request("/download-pdf", { method: "HEAD" });
     assert.equal(head.status, 200); assert.equal(head.body.length, 0);
     for (const header of ["content-length", "content-type", "content-disposition", "etag", "accept-ranges"]) assert.equal(head.headers[header], response.headers[header]);

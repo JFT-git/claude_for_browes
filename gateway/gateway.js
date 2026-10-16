@@ -389,6 +389,18 @@ function buildResponseHeaders(headers, upgraded) {
   return out;
 }
 
+// Responses behind basic auth must not enter Cloudflare's shared cache: a cached
+// object is served to anyone without authentication (a corrupted s.js was).
+// no-transform also stops Email Obfuscation from injecting a script that
+// Claude's CSP blocks. Hashed public Claude assets may stay edge-cached.
+const EDGE_CACHEABLE_HOSTS = new Set(["assets-proxy.anthropic.com", "assets.claude.ai"]);
+function edgeHeaders(rh, host) {
+  const cc = String(rh["cache-control"] || "");
+  if (!/(?:^|,)\s*no-transform\s*(?:,|$)/i.test(cc)) rh["cache-control"] = cc ? cc + ", no-transform" : "no-transform";
+  if (!EDGE_CACHEABLE_HOSTS.has(host)) rh["cloudflare-cdn-cache-control"] = "no-store";
+  return rh;
+}
+
 function pub(h, p) { return "https://" + cfg.publicHost + (h === "claude.ai" ? "" : "/p/" + h) + p; }
 
 // Hosts whose URLs are rewritten to the gateway. Artifact hosts are deliberately absent:
@@ -531,7 +543,7 @@ function extIndexHtml() {
   try { signedFirefox = fs.statSync(path.join(cfg.extDir, "gateway-connector-firefox.xpi")).isFile(); } catch (_) { /* optional package */ }
   return '<!doctype html><meta charset="utf-8"><title>Claude Gateway — extension</title>' +
     '<body style="font-family:-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5">' +
-    '<h2>Claude Gateway — расширение 2.0.7</h2>' +
+    '<h2>Claude Gateway — расширение 2.0.8</h2>' +
     '<p>Создайте отдельный профиль браузера только для шлюза. При активной защите другие внешние сайты и запросы блокируются во всём профиле, включая новые окна и фоновые процессы.</p><ul>' +
     '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge ≥ 125 (zip)</a> — скачайте свежую сборку, распакуйте, откройте <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное».</li>' +
     '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox ≥ 140 (zip, без подписи)</a> — сборка для проверки. Защищённый маршрут артефактов пока не поддерживается и блокирует запросы (fail-closed); полноценная работа файлов и артефактов не подтверждена.</li>' +
@@ -704,6 +716,7 @@ function createServer() {
 
       if (!rewritable && !canCache) {
         if (up.headers["content-length"]) rh["content-length"] = up.headers["content-length"];
+        edgeHeaders(rh, host);
         console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode);
         res.writeHead(up.statusCode, rh);
         up.pipe(res);
@@ -729,6 +742,7 @@ function createServer() {
             for (const name of ["content-encoding", "etag", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
             rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
           }
+          edgeHeaders(rh, host);
           rh["content-length"] = body.length;
           if (canCache) {
             const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
@@ -766,11 +780,18 @@ function isArtifactProxyHost(host) {
     || host === "claudemcpcontent.com" || host.endsWith(".claudemcpcontent.com");
 }
 
+// Claude's login (send_magic_link) requires an invisible hCaptcha token; its
+// script, frame and API use hcaptcha.com subdomains.
+function isChallengeHost(host) {
+  host = canonicalHost(host);
+  return host === "hcaptcha.com" || host.endsWith(".hcaptcha.com");
+}
+
 function parseConnectTarget(target) {
   const match = /^([^:]+):443$/.exec(String(target || ""));
   if (!match) return null;
   const host = canonicalHost(match[1]);
-  return host && (isArtifactProxyHost(host) || CONNECT_DEPENDENCY_HOSTS.has(host)) ? host : null;
+  return host && (isArtifactProxyHost(host) || isChallengeHost(host) || CONNECT_DEPENDENCY_HOSTS.has(host)) ? host : null;
 }
 
 // Tokens are separate from gateway Basic credentials; only their digest is retained.
@@ -959,7 +980,7 @@ module.exports = {
   cfg, ALLOWED_HOSTS, COOKIE_HOSTS, CONNECT_DEPENDENCY_HOSTS, startConnectListener,
   mintProxySession, verifyProxyAuth, proxyEndpoint, connectReady, isPublicAddress, resolveConnectAddress,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
-  buildUpstreamHeaders, buildResponseHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost, parseConnectTarget,
+  buildUpstreamHeaders, buildResponseHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost, isChallengeHost, parseConnectTarget, edgeHeaders,
   seal, unseal, migrateAll, isBanned, recordFail, cleanIp, cacheGet, cachePut, sessionState, noteClaudeResponse, listUsers,
 };
 

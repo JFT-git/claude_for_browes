@@ -156,3 +156,29 @@ test("Claude documents, including opaque frames and blob workers, reach only app
     }
   }
 });
+
+test("hCaptcha inside Claude uses the gateway route while other sites' hCaptcha is untouched", async () => {
+  const policy = require("../extension/privacy-rules.js");
+  const event = () => ({ handlers: [], addListener(fn) { this.handlers.push(fn); } });
+  const adapter = create({ browser: { runtime: { getPlatformInfo: async () => ({ os: "win" }) },
+    proxy: { onRequest: event(), settings: { get: async () => ({ levelOfControl: "controllable_by_this_extension" }), clear: async () => {} } },
+    webRequest: { onBeforeRequest: event() } },
+    protectedHost: policy.protectedHost, artifactHost: policy.artifactHost, upstreamHost: host => policy.UPSTREAM_HOSTS.includes(host),
+    filter: [], warmupUrl: WARMUP, isExtensionRequest: () => false });
+  await adapter.ensure(HOST); adapter.setSession(session());
+  const inClaude = { url: "https://api.hcaptcha.com/getcaptcha/key", method: "POST", type: "xmlhttprequest",
+    originUrl: "https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html", documentUrl: "https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html",
+    frameAncestors: [{ frameId: 0, url: "https://" + HOST + "/login" }] };
+  assert.equal(adapter.route(inClaude).type, "https");
+  assert.deepEqual(adapter.gate(inClaude), {});
+  assert.deepEqual(adapter.egress(inClaude), {});
+  assert.equal(adapter.route({ url: "https://js.hcaptcha.com/1/api.js", method: "GET", type: "script", originUrl: "https://" + HOST + "/login", documentUrl: "https://" + HOST + "/login" }).type, "https");
+  const elsewhere = { ...inClaude, frameAncestors: [{ frameId: 0, url: "https://forum.example.org/signup" }] };
+  assert.equal(adapter.route(elsewhere), undefined);
+  assert.deepEqual(adapter.gate(elsewhere), {});
+  assert.deepEqual(adapter.egress(elsewhere), {});
+  // A look-alike host requested by Claude is not on the list: closed, never direct.
+  const lookalike = { url: "https://evilhcaptcha.com/x", method: "GET", type: "script", originUrl: "https://" + HOST + "/" };
+  assert.deepEqual(adapter.route(lookalike), { type: "http", host: "127.0.0.1", port: 9 });
+  assert.deepEqual(adapter.egress(lookalike), { cancel: true });
+});

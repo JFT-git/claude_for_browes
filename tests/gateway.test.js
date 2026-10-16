@@ -203,3 +203,17 @@ test("http: internal auth endpoints, admin, extension page, websocket allow-list
   assert.match(resp, /^HTTP\/1\.1 403/);
   srv.close();
 });
+
+test("edge headers keep Cloudflare from caching or transforming authenticated responses", () => {
+  const g = require("../gateway/gateway.js");
+  const page = g.edgeHeaders({ "cache-control": "no-cache, no-store, must-revalidate" }, "claude.ai");
+  assert.equal(page["cache-control"], "no-cache, no-store, must-revalidate, no-transform");
+  assert.equal(page["cloudflare-cdn-cache-control"], "no-store");
+  assert.equal(g.edgeHeaders({}, "s-cdn.anthropic.com")["cache-control"], "no-transform");
+  assert.equal(g.edgeHeaders({}, "s-cdn.anthropic.com")["cloudflare-cdn-cache-control"], "no-store");
+  assert.equal(g.edgeHeaders({ "cache-control": "public, No-Transform" }, "claude.ai")["cache-control"], "public, No-Transform");
+  // Hashed public Claude assets may stay in the edge cache.
+  const asset = g.edgeHeaders({ "cache-control": "public, max-age=86400" }, "assets-proxy.anthropic.com");
+  assert.equal(asset["cache-control"], "public, max-age=86400, no-transform");
+  assert.equal(asset["cloudflare-cdn-cache-control"], undefined);
+});

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gateway Connector for Claude",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "description": "Routes claude.ai through your gateway. Enter your gateway host once \u2014 one build for all domains.",
   "permissions": [
     "declarativeNetRequest",
@@ -45,6 +45,7 @@
     "https://a-cdn.claude.ai/*",
     "https://*.claudeusercontent.com/*",
     "https://*.claudemcpcontent.com/*",
+    "https://*.hcaptcha.com/*",
     "https://cdn.jsdelivr.net/*",
     "https://cdnjs.cloudflare.com/*",
     "https://unpkg.com/*",

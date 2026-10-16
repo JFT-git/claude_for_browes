@@ -5,11 +5,14 @@
   "use strict";
   const DEPENDENCY_HOSTS = Object.freeze(["cdn.jsdelivr.net", "cdnjs.cloudflare.com", "unpkg.com", "fonts.googleapis.com", "fonts.gstatic.com", "esm.sh", "cdn.tailwindcss.com", "code.jquery.com", "cdn.plot.ly"]);
   const ARTIFACT_DOMAINS = Object.freeze(["claudeusercontent.com", "claudemcpcontent.com"]);
+  // Claude's email login requires an invisible hCaptcha token (send_magic_link).
+  const CHALLENGE_DOMAINS = Object.freeze(["hcaptcha.com"]);
   const UPSTREAM_HOSTS = Object.freeze(["claude.ai", "www.claude.ai", "assets.claude.ai", "assets-proxy.anthropic.com", "api.anthropic.com", "s-cdn.anthropic.com", "a-cdn.anthropic.com", "a.claude.ai", "a-cdn.claude.ai"]);
   const RESOURCE_TYPES = Object.freeze(["main_frame", "sub_frame", "xmlhttprequest", "script", "stylesheet", "image", "font", "media", "websocket", "other", "csp_report", "ping"]);
   const escapeRegex = value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const artifactPattern = "(?:[a-z0-9-]+\\.)*(?:claudeusercontent|claudemcpcontent)\\.com";
-  const protectedPattern = artifactPattern + "|" + DEPENDENCY_HOSTS.map(escapeRegex).join("|");
+  const challengePattern = "(?:[a-z0-9-]+\\.)*hcaptcha\\.com";
+  const protectedPattern = artifactPattern + "|" + challengePattern + "|" + DEPENDENCY_HOSTS.map(escapeRegex).join("|");
 
   function validGatewayHost(host) {
     if (typeof host !== "string" || host !== host.toLowerCase()) return false;
@@ -22,15 +25,19 @@
     host = String(host).toLowerCase();
     return ARTIFACT_DOMAINS.some(domain => host === domain || host.endsWith("." + domain));
   }
+  function challengeHost(host) {
+    host = String(host).toLowerCase();
+    return CHALLENGE_DOMAINS.some(domain => host === domain || host.endsWith("." + domain));
+  }
   function protectedHost(host) {
-    return artifactHost(host) || DEPENDENCY_HOSTS.includes(String(host).toLowerCase());
+    return artifactHost(host) || challengeHost(host) || DEPENDENCY_HOSTS.includes(String(host).toLowerCase());
   }
   function requiredOrigins(host) {
     if (!validGatewayHost(host)) throw new Error("Invalid gateway host");
     // Browser host-permission match patterns have no port field. Network/auth
     // rules continue to bind the exact configured authority including its port.
     const gatewayName = new URL("https://" + host).hostname;
-    return [...new Set(["https://" + gatewayName + "/*", ...UPSTREAM_HOSTS.map(value => "https://" + value + "/*"), ...DEPENDENCY_HOSTS.map(value => "https://" + value + "/*"), ...ARTIFACT_DOMAINS.map(value => "https://*." + value + "/*")])];
+    return [...new Set(["https://" + gatewayName + "/*", ...UPSTREAM_HOSTS.map(value => "https://" + value + "/*"), ...DEPENDENCY_HOSTS.map(value => "https://" + value + "/*"), ...[...ARTIFACT_DOMAINS, ...CHALLENGE_DOMAINS].map(value => "https://*." + value + "/*")])];
   }
   function fingerprintMatches(host) {
     if (!validGatewayHost(host)) throw new Error("Invalid gateway host");
@@ -48,7 +55,8 @@
   function buildProxyAllowRules(resourceTypes = RESOURCE_TYPES) {
     // Keep each regex small enough for Chrome's compiled RE2 memory limit.
     return [{ id: 2000, priority: 200, action: { type: "allow" }, condition: { requestDomains: [...ARTIFACT_DOMAINS], regexFilter: "^(?:https|wss)://[^/:]+/", resourceTypes: [...resourceTypes] } },
-      ...DEPENDENCY_HOSTS.map((host, index) => ({ id: 2010 + index, priority: 200, action: { type: "allow" }, condition: { regexFilter: "^(?:https|wss)://" + escapeRegex(host) + "/", resourceTypes: [...resourceTypes] } }))];
+      ...DEPENDENCY_HOSTS.map((host, index) => ({ id: 2010 + index, priority: 200, action: { type: "allow" }, condition: { regexFilter: "^(?:https|wss)://" + escapeRegex(host) + "/", resourceTypes: [...resourceTypes] } })),
+      { id: 2019, priority: 200, action: { type: "allow" }, condition: { requestDomains: [...CHALLENGE_DOMAINS], regexFilter: "^(?:https|wss)://[^/:]+/", resourceTypes: [...resourceTypes] } }];
   }
   function buildScopedRestrictionRules(host) {
     if (!validGatewayHost(host)) throw new Error("Invalid gateway host");
@@ -89,7 +97,7 @@
     ];
   }
 
-  const api = Object.freeze({ DEPENDENCY_HOSTS, ARTIFACT_DOMAINS, UPSTREAM_HOSTS, RESOURCE_TYPES, artifactHost, protectedHost, protectedPattern, artifactPattern, validGatewayHost, requiredOrigins, fingerprintMatches, buildProfileRestrictionRules, buildScopedRestrictionRules, buildProxyAllowRules, buildPrivacyRules });
+  const api = Object.freeze({ DEPENDENCY_HOSTS, ARTIFACT_DOMAINS, CHALLENGE_DOMAINS, UPSTREAM_HOSTS, RESOURCE_TYPES, artifactHost, challengeHost, protectedHost, protectedPattern, artifactPattern, validGatewayHost, requiredOrigins, fingerprintMatches, buildProfileRestrictionRules, buildScopedRestrictionRules, buildProxyAllowRules, buildPrivacyRules });
   root.GatewayPrivacy = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);
