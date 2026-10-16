@@ -199,7 +199,7 @@ test("session POST is cookie-free, rejects redirects and discovers HTTPS proxy f
   assert.equal(f.run("proxySession.proxy.host"), "proxy.example.test");
   assert(f.calls.order.indexOf("pac") < f.calls.order.indexOf("allow"));
   assert.equal(f.sessionRules.get(2000).priority, 200);
-  assert.equal(f.sessionRules.size, 10);
+  assert.equal(f.sessionRules.size, 11);
   for (const rule of f.sessionRules.values()) assert(rule.condition.regexFilter.length < 80);
   assert(f.alarms.has("proxy-refresh")); assert(f.alarms.has("proxy-expire"));
   const pac = f.run("proxyPac(proxySession)");

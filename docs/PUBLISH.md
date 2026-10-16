@@ -144,7 +144,7 @@ https://claude.jft-foruse.com/privacy
 
 | Разрешение | Обоснование |
 |---|---|
-| **Host access** | Fixed hosts: claude.ai and its asset/API hosts (redirected to the user's gateway), the Claude document-preview domains (claudeusercontent.com, claudemcpcontent.com) and the public libraries those previews load (jsDelivr, cdnjs, unpkg, Google Fonts, esm.sh, Tailwind CDN, jQuery CDN, Plotly CDN). The optional `https://*/*` is requested at runtime only for the single gateway domain the user enters in the options page. |
+| **Host access** | Fixed hosts: claude.ai and its asset/API hosts (redirected to the user's gateway), the Claude document-preview domains (claudeusercontent.com, claudemcpcontent.com), hcaptcha.com (the invisible check Claude requires for email sign-in) and the public libraries those previews load (jsDelivr, cdnjs, unpkg, Google Fonts, esm.sh, Tailwind CDN, jQuery CDN, Plotly CDN). The optional `https://*/*` is requested at runtime only for the single gateway domain the user enters in the options page. |
 | **declarativeNetRequest** | Routes Claude web app requests to the user-configured gateway host and signs them with the user's credentials. |
 | **scripting** | Applies consistent interface settings (UTC time zone, en-US language) and privacy controls on the gateway page. |
 | **storage** | Saves the user's gateway host and credentials locally in the browser. |

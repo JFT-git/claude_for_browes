@@ -11,6 +11,7 @@
       "requestDomains": [
         "claudeusercontent.com",
         "claudemcpcontent.com",
+        "hcaptcha.com",
         "cdn.jsdelivr.net",
         "cdnjs.cloudflare.com",
         "unpkg.com",
@@ -46,6 +47,7 @@
       "requestDomains": [
         "claudeusercontent.com",
         "claudemcpcontent.com",
+        "hcaptcha.com",
         "cdn.jsdelivr.net",
         "cdnjs.cloudflare.com",
         "unpkg.com",

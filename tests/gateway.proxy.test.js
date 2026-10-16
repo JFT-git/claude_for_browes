@@ -98,6 +98,9 @@ test("CONNECT allowlist includes only artifact domains and nine exact dependenci
     assert.equal(g.parseConnectTarget(host.replace(".", "-") + ":443"), null);
   }
   for (const target of ["claude.ai:443", "api.anthropic.com:443", "github.com:443", "127.0.0.1:443", "foo.claudeusercontent.com:8443"]) assert.equal(g.parseConnectTarget(target), null);
+  // Invisible hCaptcha for Claude's email login travels the same tunnel.
+  for (const host of ["hcaptcha.com", "js.hcaptcha.com", "api.hcaptcha.com", "newassets.hcaptcha.com"]) assert.equal(g.parseConnectTarget(host + ":443"), host);
+  for (const target of ["evilhcaptcha.com:443", "hcaptcha.com.evil.example:443", "js.hcaptcha.com:8443"]) assert.equal(g.parseConnectTarget(target), null);
 });
 test("public-address filter denies private, link-local, mapped, documentation and mixed DNS answers", async () => {
   for (const address of ["127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "198.18.0.1", "192.0.2.1", "203.0.113.2", "::1", "::ffff:8.8.8.8", "fc00::1", "fe80::1", "2001:db8::1", "2001:0db8::1", "3fff:fff::1", "2002:0808:0808::1"]) assert.equal(g.isPublicAddress(address), false, address);

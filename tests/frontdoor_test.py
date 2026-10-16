@@ -392,11 +392,11 @@ class FrontdoorLoadTests(unittest.TestCase):
                 wait_for(ready.exists, "mux fixture did not bind")
                 # A Claude page load through Cloudflare opens hundreds of origin
                 # connections at once; all of them must be forwarded.
-                for _ in range(600):
-                    open_client()
-                wait_for(lambda: len(forwarded) >= 600, "cold asset burst was not forwarded")
-                for _ in range(mux.MAX_CONNECTIONS - 600):
-                    open_client()
+                # Batches keep the burst within macOS's 128-entry listen backlog.
+                for opened in range(0, mux.MAX_CONNECTIONS, 100):
+                    for _ in range(min(100, mux.MAX_CONNECTIONS - opened)):
+                        open_client()
+                    wait_for(lambda: len(forwarded) >= min(opened + 100, mux.MAX_CONNECTIONS), "cold asset burst was not forwarded")
                 wait_for(lambda: len(forwarded) == mux.MAX_CONNECTIONS, "bounded capacity was not reached")
                 wait_for(lambda: any(entry["active"] == mux.MAX_CONNECTIONS for entry in reports()), "capacity peak not reported")
                 proc_fds = Path(f"/proc/{process.pid}/fd")
