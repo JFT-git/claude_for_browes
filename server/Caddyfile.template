@@ -58,6 +58,27 @@ __DOMAIN__ {
         }
     }
 
+    # Browsers apply no header rules to WebSocket handshakes (voice, artifact
+    # sync, terminal), so these arrive without the extension's Basic login. The
+    # gateway authenticates them with its own signed __Host-gw_ws cookie; the
+    # identity header is never taken from the client and bans still apply.
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade websocket
+        not header Authorization *
+        not path /__*
+    }
+    handle @websocket {
+        forward_auth gateway:8088 {
+            uri /__ban-check
+            header_up X-Client-IP {client_ip}
+        }
+        reverse_proxy gateway:8088 {
+            header_up -X-Remote-User
+            header_up -X-Client-IP
+        }
+    }
+
     # Everything else requires basic_auth. The authenticated username is passed
     # to the gateway via X-Remote-User so it can pick that user's cookie file.
     route {

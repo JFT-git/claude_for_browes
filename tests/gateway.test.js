@@ -217,3 +217,72 @@ test("edge headers keep Cloudflare from caching or transforming authenticated re
   assert.equal(asset["cache-control"], "public, max-age=86400, no-transform");
   assert.equal(asset["cloudflare-cdn-cache-control"], undefined);
 });
+
+test("upgrade subrequests for internal auth endpoints are answered locally", async () => {
+  const net = require("net");
+  const server = g.createServer();
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const upgrade = path => new Promise((resolve, reject) => {
+    const socket = net.connect(server.address().port, "127.0.0.1", () => socket.write(
+      "GET " + path + " HTTP/1.1\r\nhost: gateway.example.test\r\nconnection: Upgrade\r\nupgrade: websocket\r\n" +
+      "sec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nx-client-ip: 192.0.2.77\r\n\r\n"));
+    let data = ""; socket.on("data", chunk => { data += chunk; }); socket.on("end", () => resolve(data.split("\r\n")[0])); socket.on("error", reject);
+    socket.setTimeout(3000, () => { socket.destroy(); reject(new Error("no local answer")); });
+  });
+  try {
+    assert.match(await upgrade("/__ban-check"), /^HTTP\/1\.1 200 /);
+    assert.match(await upgrade("/__authfail"), /^HTTP\/1\.1 401 /);
+    assert.match(await upgrade("/__anything"), /^HTTP\/1\.1 404 /);
+  } finally {
+    server.close();
+  }
+});
+
+test("WebSocket handshakes authenticate with a signed gateway cookie, not Basic", async () => {
+  const cookie = g.wsCookieHeader("alice");
+  assert.match(cookie, /^__Host-gw_ws=[^;]+; Path=\/; Max-Age=\d+; Secure; HttpOnly; SameSite=Strict$/);
+  const value = cookie.split(";")[0];
+  assert.equal(g.wsCookieUser("other=1; " + value), "alice");
+  assert.equal(g.wsCookieUser(value.slice(0, -2) + "xx"), "");
+  assert.equal(g.wsCookieUser(value, Date.now() + 24 * 3600 * 1000), "");
+  // Issued only to Basic-authenticated users that lack a valid cookie; never cached.
+  assert.match(g.withWsCookie({}, "alice", "")["set-cookie"], /^__Host-gw_ws=/);
+  assert.equal(g.withWsCookie({}, "alice", value)["set-cookie"], undefined);
+  assert.equal(g.withWsCookie({}, "", "")["set-cookie"], undefined);
+  assert.match(g.withWsCookie({}, "bob", value)["set-cookie"], /^__Host-gw_ws=/);
+
+  const net = require("net");
+  const server = g.createServer();
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const upgrade = headers => new Promise((resolve, reject) => {
+    const socket = net.connect(server.address().port, "127.0.0.1", () => socket.write(
+      "GET /api/ws/speech_to_text/voice_stream HTTP/1.1\r\nhost: gateway.example.test\r\nconnection: Upgrade\r\nupgrade: websocket\r\n" +
+      "sec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n" + headers + "\r\n"));
+    let data = ""; socket.on("data", chunk => { data += chunk; }); socket.on("end", () => resolve(data.split("\r\n")[0])); socket.on("error", reject);
+    socket.setTimeout(3000, () => { socket.destroy(); reject(new Error("no local answer")); });
+  });
+  try {
+    // Missing or stale cookies are refused without feeding the password-failure ban.
+    for (let i = 0; i < 12; i++) assert.match(await upgrade("x-client-ip: 192.0.2.88\r\ncookie: __Host-gw_ws=forged.value\r\n"), /^HTTP\/1\.1 401 /);
+    assert.equal(g.isBanned("192.0.2.88"), false);
+  } finally {
+    server.close();
+  }
+});
+
+test("only web-search favicon endpoints of Google are rewritten and proxied", () => {
+  const out = g.rewriteUrls('a=`https://t0.gstatic.com/faviconV2?url=${u}`;b=`https://www.google.com/s2/favicons?domain=${d}`;' +
+    'c="https:\\/\\/www.google.com\\/s2\\/favicons?x";d="https://www.google.com/search?q=1";e="https://t0.gstatic.com/images"');
+  assert.match(out, /https:\/\/[^/]+\/p\/t0\.gstatic\.com\/faviconV2\?url=/);
+  assert.match(out, /https:\/\/[^/]+\/p\/www\.google\.com\/s2\/favicons\?domain=/);
+  assert.match(out, /https:\\\/\\\/[^\\]+\\\/p\\\/www\.google\.com\\\/s2\\\/favicons/);
+  assert.match(out, /d="https:\/\/www\.google\.com\/search\?q=1"/);
+  assert.match(out, /e="https:\/\/t0\.gstatic\.com\/images"/);
+  assert.deepEqual(g.resolveTarget("/p/www.google.com/s2/favicons?domain=example.org&sz=128"), { host: "www.google.com", urlPath: "/s2/favicons?domain=example.org&sz=128" });
+  assert.deepEqual(g.resolveTarget("/p/t0.gstatic.com/faviconV2?url=https%3A%2F%2Fexample.org"), { host: "t0.gstatic.com", urlPath: "/faviconV2?url=https%3A%2F%2Fexample.org" });
+  for (const url of ["/p/www.google.com/search?q=1", "/p/www.google.com/s2/faviconsX", "/p/t0.gstatic.com/images", "/p/www.google.com/", "/p/google.com/s2/favicons"]) assert.equal(g.resolveTarget(url), null, url);
+  assert.equal(g.COOKIE_HOSTS.has("www.google.com"), false);
+  // s2/favicons answers with a redirect to t0.gstatic.com; it must stay on the gateway.
+  assert.match(g.rewriteLocation("https://t0.gstatic.com/faviconV2?client=SOCIAL&url=x", "www.google.com", "/s2/favicons?domain=x"), /^https:\/\/[^/]+\/p\/t0\.gstatic\.com\/faviconV2\?client=SOCIAL&url=x$/);
+  assert.equal(g.rewriteLocation("https://t0.gstatic.com/images?x", "www.google.com", "/s2/favicons"), "https://t0.gstatic.com/images?x");
+});
