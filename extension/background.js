@@ -38,7 +38,8 @@ function buildAuthRule(host, user, pass) {
     action: { type: "modifyHeaders", requestHeaders: [{ header: "authorization", operation: "set", value: basicHeader(user, pass) }] },
     // A domain-anchor filter also matches suffixes and subdomains. Credentials
     // must be limited to the configured HTTPS authority and its path boundary.
-    condition: { regexFilter: "^https://" + escapeRegex(host) + "/", resourceTypes: RESOURCE_TYPES }
+    // WebSocket handshakes (voice, artifact sync, terminal) need it as well.
+    condition: { regexFilter: "^(?:https|wss)://" + escapeRegex(host) + "/", resourceTypes: RESOURCE_TYPES }
   };
 }
 function buildRules(host) {
@@ -226,12 +227,22 @@ function clearAll() { invalidate(); return serialized(clearAllInternal); }
 function proxyPac(session, gatewayHost = session.gatewayHost) {
   if (!validGatewayHost(gatewayHost)) throw new Error("Invalid gateway authority");
   const endpoint = session.proxy.host + ":" + session.proxy.port;
+  const gateway = new URL("https://" + gatewayHost);
   // This connector restricts the entire dedicated browser profile. An exact
   // gateway authority is the only direct exception; unknown/cleartext/alternate
   // port requests go to a dead TLS endpoint with no fallback list.
+  // Chrome hands WebSocket URLs to the PAC in a form a "scheme://host/" pattern
+  // does not match, so the host comes from the PAC's own argument and only the
+  // scheme and port are read from the URL. Otherwise voice, artifact sync and
+  // terminal sockets to the gateway hit the dead end.
   return "function FindProxyForURL(url, host) {\n" +
-    "if (new RegExp(" + JSON.stringify("^https://" + escapeRegex(gatewayHost) + "/") + ", \"i\").test(url)) return \"DIRECT\";\n" +
-    "if (new RegExp(" + JSON.stringify("^(?:https|wss)://(?:" + PROTECTED_PATTERN + ")/") + ", \"i\").test(url)) return \"HTTPS " + endpoint + "\";\n" +
+    "var scheme = url.substring(0, url.indexOf(\":\")).toLowerCase();\n" +
+    "if (scheme !== \"https\" && scheme !== \"wss\") return \"HTTPS 127.0.0.1:9\";\n" +
+    "var m = /^[a-z][a-z0-9+.-]*:\\/\\/(?:[^\\/?#@]*@)?(?:\\[[^\\]]*\\]|[^\\/?#:]*)(?::(\\d*))?/i.exec(url);\n" +
+    "var port = m && m[1] ? m[1] : \"443\";\n" +
+    "var name = String(host).toLowerCase();\n" +
+    "if (name === " + JSON.stringify(gateway.hostname) + " && port === " + JSON.stringify(gateway.port || "443") + ") return \"DIRECT\";\n" +
+    "if (port === \"443\" && new RegExp(" + JSON.stringify("^(?:" + PROTECTED_PATTERN + ")$") + ", \"i\").test(name)) return \"HTTPS " + endpoint + "\";\n" +
     "return \"HTTPS 127.0.0.1:9\";\n}";
 }
 async function gatewayPermission(cfg) {

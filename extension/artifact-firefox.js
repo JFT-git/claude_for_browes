@@ -18,6 +18,10 @@
       catch (_) { return null; }
     }
     function owned(url) { try { const u = new URL(url); return u.protocol === "https:" && !u.username && !u.password && u.origin === origin(); } catch (_) { return false; } }
+    // Claude rewrites its own URL with history.pushState (e.g. ?artifact=<id>
+    // when the panel opens), so ancestors are matched by origin; navigations
+    // to another document are tracked separately through frame versions.
+    function sameOrigin(a, b) { try { return new URL(a).origin === new URL(b).origin; } catch (_) { return false; } }
     function artifact(url) { try { const u = new URL(url); return u.protocol === "https:" && !u.port && !u.username && !u.password && DOMAINS.some(d => u.hostname === d || u.hostname.endsWith("." + d)); } catch (_) { return false; } }
     function fault(reason) {
       if (failed) return;
@@ -99,12 +103,12 @@
         if (details.frameId === 0 || details.frameAncestors[0]?.frameId !== details.parentFrameId) return null;
         for (const item of details.frameAncestors) {
           frame = frames.get(item.frameId);
-          if (!frame || frame.url !== item.url) return null;
+          if (!frame || !sameOrigin(frame.url, item.url)) return null;
           ancestors.push(frame);
         }
       } else {
         frame = frames.get(details.frameId);
-        if (!frame || !owned(frame.url) || frame.url !== details.documentUrl) return null;
+        if (!frame || !owned(frame.url) || !sameOrigin(frame.url, details.documentUrl)) return null;
         let cursor = frame;
         const seen = new Set();
         while (cursor) {

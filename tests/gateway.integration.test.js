@@ -68,7 +68,8 @@ test.before(async () => {
         "content-encoding": encoding === "stacked" ? "gzip, br" : encoding, etag: '"synthetic-encoded-etag"',
         "last-modified": "Wed, 01 Jan 2025 00:00:00 GMT",
         "content-md5": "synthetic", digest: "sha-256=synthetic", "content-digest": "sha-256=:synthetic:", "repr-digest": "sha-256=:synthetic:",
-        "accept-ranges": "bytes", "x-test-received-encoding": req.headers["accept-encoding"] || "absent" };
+        "accept-ranges": "bytes", "x-test-received-encoding": req.headers["accept-encoding"] || "absent",
+        "x-test-received-validators": [req.headers["if-modified-since"], req.headers["if-none-match"]].filter(Boolean).length ? "present" : "absent" };
       if (kind === "attachment") headers["content-disposition"] = 'attachment; filename="synthetic.js.gz"';
       if (kind === "partial") headers["content-range"] = `bytes 0-${body.length - 1}/${body.length}`;
       if (status !== 204) headers["content-length"] = status === 205 ? 0 : body.length;
@@ -184,7 +185,11 @@ test("extension download page describes setup and only links an available signed
 
 test("session cookie is stored server-side and never returned to the browser", async () => {
   const response = await request("/capture", { headers: { "x-remote-user": "test-user" } });
-  assert.equal(response.headers["set-cookie"], undefined);
+  // Only the gateway's own signed WebSocket cookie may reach the browser; Claude's never does.
+  const cookies = [].concat(response.headers["set-cookie"] || []);
+  assert.deepEqual(cookies.map(c => c.split("=")[0]), ["__Host-gw_ws"]);
+  assert.equal(gateway.wsCookieUser(cookies[0].split(";")[0]), "test-user");
+  for (const c of cookies) assert.doesNotMatch(c, /sessionKey|synthetic/i);
   assert.equal(gateway.sessionState("test-user"), "ok");
   assert.equal(fs.statSync(path.join(dir, "test-user.json")).mode & 0o777, 0o600);
 });
@@ -220,8 +225,7 @@ test("gzip, Brotli and deflate HTML/scripts decode before rewriting and cache va
       assert.deepEqual(response.body, Buffer.from(expected));
       assert.equal(response.headers["content-length"], String(response.body.length));
       assert.equal(response.headers["x-test-received-encoding"], "identity");
-      assert.equal(response.headers["last-modified"], "Wed, 01 Jan 2025 00:00:00 GMT");
-      for (const header of ["content-encoding", "etag", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) assert.equal(response.headers[header], undefined, header);
+      for (const header of ["content-encoding", "etag", "last-modified", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) assert.equal(response.headers[header], undefined, header);
     }
   }
   const url = "/p/assets.claude.ai/compressed/br/script";
@@ -402,4 +406,17 @@ test("malformed jar and migration errors never log input excerpts", () => {
     assert.ok(captured.every(line => !line.includes(marker)));
     assert.ok(captured.every(line => line.endsWith("invalid JSON")));
   } finally { console.error = previousError; gateway.cfg.cookiesKey = previousKey; }
+});
+
+test("rewritten resources are never revalidated against upstream validators", async () => {
+  const validators = { "if-modified-since": "Wed, 01 Jan 2025 00:00:00 GMT", "if-none-match": '"synthetic-encoded-etag"' };
+  // Cloudflare revalidates a cached script by path; browsers mark documents and scripts by destination.
+  for (const [url, headers] of [["/compressed/gzip/script", { ...validators, "sec-fetch-dest": "script" }],
+    ["/compressed/gzip/html", { ...validators, "sec-fetch-dest": "document" }], ["/compressed/gzip/app.js", validators]]) {
+    const response = await request(url, { headers });
+    assert.equal(response.headers["x-test-received-validators"], "absent", url);
+  }
+  // API calls keep conditional requests; their bodies are not rewritten.
+  const api = await request("/compressed/gzip/script", { headers: { ...validators, "sec-fetch-dest": "empty" } });
+  assert.equal(api.headers["x-test-received-validators"], "present");
 });

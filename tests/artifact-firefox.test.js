@@ -171,3 +171,24 @@ test("frame redirects remain native and final responses require a fresh owned an
   await g.webRequest.onBeforeSendHeaders.fire(moved);
   assert.deepEqual(await g.webRequest.onHeadersReceived.fire(g.response(moved, policy)), {});
 });
+
+test("Claude's nested artifact panel is recognised after the app rewrites its own URL", async () => {
+  // Real layout: gateway chat → gateway /code/artifact frame → artifact frame. Opening
+  // the panel adds ?artifact=<id> to the chat URL with history.pushState.
+  const f = await fixture();
+  f.state.frames = [{ frameId: 0, parentFrameId: -1, url: ORIGIN + "/chat/abc?artifact=xyz" },
+    { frameId: 7, parentFrameId: 0, url: ORIGIN + "/code/artifact/xyz?m=dark" }];
+  const req = f.frame({ frameId: 8, parentFrameId: 7, url: "https://xyz.frame.claudeusercontent.com/_f/1/",
+    frameAncestors: [{ frameId: 7, url: ORIGIN + "/code/artifact/xyz?m=dark" }, { frameId: 0, url: ORIGIN + "/chat/abc" }] });
+  await f.webRequest.onBeforeSendHeaders.fire(req);
+  const headers = [{ name: "Content-Security-Policy", value: "frame-ancestors https://claude.ai" }, { name: "X-Frame-Options", value: "SAMEORIGIN" }];
+  const received = await f.webRequest.onHeadersReceived.fire(f.response(req, headers));
+  assert.deepEqual(received.responseHeaders, [{ name: "Content-Security-Policy", value: "frame-ancestors https://claude.ai " + ORIGIN }]);
+  // A different origin in the chain is still refused.
+  const g = await fixture();
+  g.state.frames = [{ frameId: 0, parentFrameId: -1, url: ORIGIN + "/chat/abc" }, { frameId: 7, parentFrameId: 0, url: "https://foreign.example/code/artifact/xyz" }];
+  const foreign = g.frame({ frameId: 8, parentFrameId: 7, url: "https://xyz.frame.claudeusercontent.com/_f/1/",
+    frameAncestors: [{ frameId: 7, url: ORIGIN + "/code/artifact/xyz" }, { frameId: 0, url: ORIGIN + "/chat/abc" }] });
+  await g.webRequest.onBeforeSendHeaders.fire(foreign);
+  assert.deepEqual(await g.webRequest.onHeadersReceived.fire(g.response(foreign, headers)), {});
+});

@@ -182,6 +182,8 @@ class CaddyAuthTests(unittest.TestCase):
 
             def respond(self):
                 user = self.headers.get("X-Remote-User", "")
+                if self.path.startswith("/api/ws/") and self.headers.get("X-Client-IP"):
+                    user = "SPOOFED_CLIENT_IP"
                 requests.append({"path": self.path, "method": self.command, "user": user})
                 body = json.dumps({"user": user}).encode()
                 self.send_response(401 if self.path == "/__authfail" else 200)
@@ -267,6 +269,23 @@ class CaddyAuthTests(unittest.TestCase):
                         requests.clear()
                         self.assertEqual(request(path)[0], 404)
                         self.assertFalse(requests)
+                    # WebSocket handshakes carry no Basic login; the gateway checks its
+                    # signed cookie. Identity and client-IP headers never pass through.
+                    upgrade = {"Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13",
+                               "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "X-Remote-User": "fixture-bob", "X-Client-IP": "192.0.2.10"}
+                    requests.clear()
+                    status, _, body = request("/api/ws/fixture", upgrade)
+                    self.assertEqual(status, 200)
+                    # The ban check runs first; the proxied handshake carries no identity.
+                    self.assertEqual([item["path"] for item in requests], ["/__ban-check", "/api/ws/fixture"])
+                    self.assertEqual(requests[-1]["user"], "")
+                    for path in ("/__ban-check", "/__authfail"):
+                        requests.clear()
+                        self.assertEqual(request(path, upgrade)[0], 404)
+                        self.assertFalse(requests)
+                    requests.clear()
+                    status, _, body = request("/api/ws/fixture", {**{k: v for k, v in upgrade.items() if k != "X-Client-IP"}, "Authorization": basic("fixture-alice")})
+                    self.assertEqual((status, json.loads(body)["user"]), (200, "fixture-alice"))
                 finally:
                     process.terminate()
                     process.communicate(timeout=3)

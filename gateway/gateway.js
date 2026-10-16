@@ -401,6 +401,12 @@ function edgeHeaders(rh, host) {
   return rh;
 }
 
+const REWRITTEN_DESTINATIONS = new Set(["document", "iframe", "frame", "script", "style", "worker", "sharedworker", "serviceworker"]);
+function likelyRewritten(headers, urlPath) {
+  const dest = String(headers["sec-fetch-dest"] || "").toLowerCase();
+  return REWRITTEN_DESTINATIONS.has(dest) || /\.(?:m?js|css|html?)(?:[?#]|$)/i.test(urlPath);
+}
+
 function pub(h, p) { return "https://" + cfg.publicHost + (h === "claude.ai" ? "" : "/p/" + h) + p; }
 
 // Hosts whose URLs are rewritten to the gateway. Artifact hosts are deliberately absent:
@@ -411,13 +417,23 @@ const REWRITE_HOSTS = [
   "a-cdn.claude.ai", "a.claude.ai", "a-cdn.anthropic.com", "s-cdn.anthropic.com",
 ];
 const REVERSE_HOSTS = new Set(["claude.ai", "www.claude.ai", ...REWRITE_HOSTS]);
+// Web-search citations show site icons from these two services. Only the icon
+// endpoints are rewritten and proxied (without Claude cookies), so the browser
+// never contacts Google directly and no other Google path is reachable.
+const FAVICON_ROUTES = new Map([["www.google.com", "/s2/favicons"], ["t0.gstatic.com", "/faviconV2"]]);
+function faviconRoute(host, urlPath) {
+  const prefix = FAVICON_ROUTES.get(host);
+  return !!prefix && (urlPath === prefix || urlPath.startsWith(prefix + "?"));
+}
 
 function rewriteLocation(value, host, urlPath) {
   try {
     const target = new URL(value, "https://" + host + urlPath);
     const targetHost = canonicalHost(target.hostname);
     if ((target.protocol === "https:" || target.protocol === "http:") && !target.username && !target.password
-        && (!target.port || target.port === "443") && REVERSE_HOSTS.has(targetHost)) {
+        && (!target.port || target.port === "443")
+        && (REVERSE_HOSTS.has(targetHost) || faviconRoute(targetHost, target.pathname + target.search))) {
+      // Google's s2/favicons redirects to t0.gstatic.com; keep icons on the gateway.
       return pub(targetHost, target.pathname + target.search + target.hash);
     }
   } catch (_) { /* Preserve malformed or non-HTTP redirect values unchanged. */ }
@@ -430,6 +446,10 @@ function rewriteUrls(s) {
     const re = h.replace(/\./g, "\\.");
     s = s.replace(new RegExp("https?:\\/\\/" + re, "g"), pub(h, ""));       // plain
     s = s.replace(new RegExp("https?:\\\\/\\\\/" + re, "g"), pub(h, "").replace(/\//g, "\\/")); // JSON-escaped
+  }
+  for (const [h, prefix] of FAVICON_ROUTES) {
+    s = s.split("https://" + h + prefix).join(pub(h, prefix));
+    s = s.split(("https://" + h + prefix).replace(/\//g, "\\/")).join(pub(h, prefix).replace(/\//g, "\\/"));
   }
   return s;
 }
@@ -543,7 +563,7 @@ function extIndexHtml() {
   try { signedFirefox = fs.statSync(path.join(cfg.extDir, "gateway-connector-firefox.xpi")).isFile(); } catch (_) { /* optional package */ }
   return '<!doctype html><meta charset="utf-8"><title>Claude Gateway — extension</title>' +
     '<body style="font-family:-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5">' +
-    '<h2>Claude Gateway — расширение 2.0.8</h2>' +
+    '<h2>Claude Gateway — расширение 2.0.9</h2>' +
     '<p>Создайте отдельный профиль браузера только для шлюза. При активной защите другие внешние сайты и запросы блокируются во всём профиле, включая новые окна и фоновые процессы.</p><ul>' +
     '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge ≥ 125 (zip)</a> — скачайте свежую сборку, распакуйте, откройте <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное».</li>' +
     '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox ≥ 140 (zip, без подписи)</a> — сборка для проверки. Защищённый маршрут артефактов пока не поддерживается и блокирует запросы (fail-closed); полноценная работа файлов и артефактов не подтверждена.</li>' +
@@ -580,17 +600,65 @@ function resolveTarget(rawUrl) {
     urlPath = m[2] || "/";
     // Artifact HTML/JS is user-generated and must retain its isolated real origin.
     // Serving it below /p/ would give it the gateway's cookies and API access.
+    if (faviconRoute(host, urlPath)) return { host, urlPath };
     if (!allowedHost(host) || isArtifactProxyHost(host)) return null;
   } else { host = "claude.ai"; urlPath = rawUrl; }
   if (!urlPath.startsWith("/")) return null;
   return { host, urlPath };
 }
 
+// Browsers apply no header rules to WebSocket handshakes, so they cannot carry
+// the extension's Basic credentials. Authenticated responses therefore also set
+// a short-lived signed cookie, which the upgrade path accepts instead. The key
+// lives only in this process: a restart (e.g. on user removal) revokes them all.
+const WS_COOKIE = "__Host-gw_ws";
+const WS_COOKIE_MAX_AGE = 12 * 3600;
+const wsCookieKey = crypto.randomBytes(32);
+function wsCookieMac(payload) { return crypto.createHmac("sha256", wsCookieKey).update(payload).digest(); }
+function wsCookieHeader(user, now = Date.now()) {
+  const payload = Buffer.from(JSON.stringify({ u: user, e: Math.floor(now / 1000) + WS_COOKIE_MAX_AGE })).toString("base64url");
+  return WS_COOKIE + "=" + payload + "." + wsCookieMac(payload).toString("base64url") +
+    "; Path=/; Max-Age=" + WS_COOKIE_MAX_AGE + "; Secure; HttpOnly; SameSite=Strict";
+}
+function wsCookieUser(cookieHeader, now = Date.now()) {
+  for (const part of String(cookieHeader || "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0 || part.slice(0, eq).trim() !== WS_COOKIE) continue;
+    const [payload, mac, extra] = part.slice(eq + 1).trim().split(".");
+    if (!payload || !mac || extra !== undefined) continue;
+    const want = wsCookieMac(payload), got = Buffer.from(mac, "base64url");
+    if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) continue;
+    try {
+      const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+      const user = sanitizeUser(data.u);
+      if (user && user === data.u && Number.isSafeInteger(data.e) && data.e * 1000 > now) return user;
+    } catch (_) { /* malformed payload */ }
+  }
+  return "";
+}
+// Refresh the cookie whenever a Basic-authenticated response finds it missing or stale.
+function withWsCookie(headers, user, cookieHeader) {
+  return user && wsCookieUser(cookieHeader) !== user ? Object.assign({}, headers, { "set-cookie": wsCookieHeader(user) }) : headers;
+}
+
 function handleUpgrade(req, socket) {
   socket.on("error", () => socket.destroy());
+  // Caddy's forward_auth and handle_errors subrequests carry the client's
+  // Upgrade headers; answer them here instead of proxying them to Claude.
+  const pathOnly = req.url.split("?")[0];
+  if (pathOnly.startsWith("/__")) {
+    let status = 404;
+    if (pathOnly === "/__ban-check") status = isBanned(cleanIp(req.headers["x-client-ip"])) ? 429 : 200;
+    else if (pathOnly === "/__authfail") status = recordFail(cleanIp(req.headers["x-client-ip"])) ? 429 : 401;
+    socket.end("HTTP/1.1 " + status + " " + (http.STATUS_CODES[status] || "") + "\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+    return;
+  }
   const t = resolveTarget(req.url);
   if (!t) { socket.end("HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"); return; }
-  const user = sanitizeUser(req.headers["x-remote-user"]);
+  // Caddy strips X-Remote-User on its cookie-authenticated WebSocket route.
+  const user = sanitizeUser(req.headers["x-remote-user"]) || wsCookieUser(req.headers.cookie);
+  // A stale cookie after a restart must not count as a password failure.
+  if (!user) { socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"); return; }
   const cookie = COOKIE_HOSTS.has(t.host) ? cookieHeaderFor(user) : "";
   const headers = buildUpstreamHeaders(req.headers, t.host, cookie, { ws: true });
   const preq = https.request({ hostname: t.host, port: 443, path: t.urlPath, method: "GET", headers });
@@ -667,6 +735,10 @@ function createServer() {
     const cookieHeader = sendsCookies ? cookieHeaderFor(user) : "";
     const sentSession = cookieHeader.includes("sessionKey=");
     const headers = buildUpstreamHeaders(req.headers, host, cookieHeader);
+    // Rewritten documents, scripts and styles differ from upstream's bytes, so
+    // upstream validators must not answer for them: a 304 kept stale or
+    // corrupted copies alive in browsers and in Cloudflare's cache.
+    if (likelyRewritten(req.headers, urlPath)) { delete headers["if-modified-since"]; delete headers["if-none-match"]; }
     const logPath = redactPath(urlPath);
     if (user) statOf(user).lastSeen = Date.now();
 
@@ -675,7 +747,7 @@ function createServer() {
     if (cacheable) {
       const hit = cacheGet(cacheKey);
       if (hit) {
-        res.writeHead(hit.status, Object.assign({}, hit.headers, { "content-length": hit.body.length, "x-cache": "HIT" }));
+        res.writeHead(hit.status, withWsCookie(Object.assign({}, hit.headers, { "content-length": hit.body.length, "x-cache": "HIT" }), user, req.headers.cookie));
         return res.end(hit.body);
       }
     }
@@ -718,7 +790,7 @@ function createServer() {
         if (up.headers["content-length"]) rh["content-length"] = up.headers["content-length"];
         edgeHeaders(rh, host);
         console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode);
-        res.writeHead(up.statusCode, rh);
+        res.writeHead(up.statusCode, withWsCookie(rh, user, req.headers.cookie));
         up.pipe(res);
         return;
       }
@@ -739,7 +811,7 @@ function createServer() {
             if (body.length > cfg.maxRewriteBytes) return failResponse();
             // Rewritten bytes form a new identity representation, so origin byte
             // validators and range support no longer describe the response.
-            for (const name of ["content-encoding", "etag", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
+            for (const name of ["content-encoding", "etag", "last-modified", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
             rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
           }
           edgeHeaders(rh, host);
@@ -749,7 +821,8 @@ function createServer() {
             cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
           }
           console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
-          res.writeHead(up.statusCode, rh);
+          // After cachePut: the shared cache must never hold a per-user cookie.
+          res.writeHead(up.statusCode, withWsCookie(rh, user, req.headers.cookie));
           res.end(body);
         } catch (_) {
           failResponse();
@@ -758,12 +831,14 @@ function createServer() {
     });
 
     proxyReq.setTimeout(cfg.upstreamIdleMs, () => proxyReq.destroy(new Error("upstream idle timeout")));
+    let clientGone = false;
     proxyReq.on("error", (e) => {
-      console.error("[upstream] " + host + " " + logPath + " " + safeError(e));
+      // A browser that navigated away aborts the request; that is not an upstream fault.
+      if (!clientGone) console.error("[upstream] " + host + " " + logPath + " " + safeError(e));
       if (!res.headersSent) { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); } else res.destroy();
     });
-    req.on("aborted", () => proxyReq.destroy());
-    res.once("close", () => { if (!res.writableEnded) proxyReq.destroy(); });
+    req.on("aborted", () => { clientGone = true; proxyReq.destroy(); });
+    res.once("close", () => { if (!res.writableEnded) { clientGone = true; proxyReq.destroy(); } });
     req.pipe(proxyReq); // stream the body — no buffering of uploads
   });
   server.on("upgrade", handleUpgrade);
@@ -980,7 +1055,7 @@ module.exports = {
   cfg, ALLOWED_HOSTS, COOKIE_HOSTS, CONNECT_DEPENDENCY_HOSTS, startConnectListener,
   mintProxySession, verifyProxyAuth, proxyEndpoint, connectReady, isPublicAddress, resolveConnectAddress,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
-  buildUpstreamHeaders, buildResponseHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost, isChallengeHost, parseConnectTarget, edgeHeaders,
+  buildUpstreamHeaders, buildResponseHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost, isChallengeHost, parseConnectTarget, edgeHeaders, likelyRewritten, wsCookieHeader, wsCookieUser, withWsCookie, resolveTarget, rewriteLocation,
   seal, unseal, migrateAll, isBanned, recordFail, cleanIp, cacheGet, cachePut, sessionState, noteClaudeResponse, listUsers,
 };
 

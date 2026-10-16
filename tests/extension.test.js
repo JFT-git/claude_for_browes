@@ -153,7 +153,9 @@ test("Basic credentials match only the exact HTTPS authority, including port", (
   const rule = f.run('buildAuthRule("gateway.example.test", "test-user", "test-password")');
   const matches = new RegExp(rule.condition.regexFilter, "i");
   assert(matches.test("https://gateway.example.test/api/messages"));
-  for (const url of ["https://gateway.example.test.evil.test/", "https://sub.gateway.example.test/", "https://gatewayXexampleXtest/", "https://evil.test/?next=https://gateway.example.test/", "https://gateway.example.test@evil.test/", "https://gateway.example.test:8443/", "http://gateway.example.test/", "wss://gateway.example.test/"]) assert.equal(matches.test(url), false, url);
+  // Voice, artifact sync and terminal WebSockets are proxied by the gateway behind the same login.
+  assert(matches.test("wss://gateway.example.test/api/ws/speech_to_text/voice_stream"));
+  for (const url of ["https://gateway.example.test.evil.test/", "https://sub.gateway.example.test/", "https://gatewayXexampleXtest/", "https://evil.test/?next=https://gateway.example.test/", "https://gateway.example.test@evil.test/", "https://gateway.example.test:8443/", "http://gateway.example.test/", "ws://gateway.example.test/", "wss://gateway.example.test.evil.test/"]) assert.equal(matches.test(url), false, url);
   assert.equal(rule.condition.urlFilter, undefined);
   assert(new RegExp(f.run('buildAuthRule("gateway.example.test:9443", "u", "p").condition.regexFilter')).test("https://gateway.example.test:9443/"));
 });
@@ -203,13 +205,28 @@ test("session POST is cookie-free, rejects redirects and discovers HTTPS proxy f
   for (const rule of f.sessionRules.values()) assert(rule.condition.regexFilter.length < 80);
   assert(f.alarms.has("proxy-refresh")); assert(f.alarms.has("proxy-expire"));
   const pac = f.run("proxyPac(proxySession)");
-  const pacContext = vm.createContext({ dnsDomainIs: (host, domain) => host.endsWith(domain) }); vm.runInContext(pac, pacContext);
+  const pacContext = vm.createContext({ dnsDomainIs: (host, domain) => host.endsWith(domain), URL }); vm.runInContext(pac, pacContext);
   assert.equal(vm.runInContext('FindProxyForURL("https://a.frame.claudeusercontent.com/", "a.frame.claudeusercontent.com")', pacContext), "HTTPS proxy.example.test:8443");
   assert.equal(vm.runInContext('FindProxyForURL("https://example.net/", "example.net")', pacContext), "HTTPS 127.0.0.1:9");
   assert.equal(vm.runInContext('FindProxyForURL("https://gateway.example.test/", "gateway.example.test")', pacContext), "DIRECT");
+  // Voice, artifact sync and terminal sockets: Chrome's PAC URL for wss may carry
+  // an explicit default port or no path, so the host argument decides.
+  for (const url of ["wss://gateway.example.test/api/ws/voice", "wss://gateway.example.test", "wss://gateway.example.test:443", "https://gateway.example.test:443/"]) {
+    pacContext.testURL = url;
+    assert.equal(vm.runInContext('FindProxyForURL(testURL, "gateway.example.test")', pacContext), "DIRECT", url);
+  }
+  for (const url of ["wss://a.frame.claudeusercontent.com", "wss://a.frame.claudeusercontent.com:443", "https://js.hcaptcha.com/1/api.js"]) {
+    pacContext.testURL = url;
+    assert.equal(vm.runInContext('FindProxyForURL(testURL, new URL(testURL.replace(/^wss/, "https")).hostname)', pacContext), "HTTPS proxy.example.test:8443", url);
+  }
+  for (const [url, host] of [["ws://gateway.example.test/api/ws/voice", "gateway.example.test"], ["wss://gateway.example.test:8443", "gateway.example.test"],
+    ["wss://evil.example", "evil.example"], ["https://a.frame.claudeusercontent.com:8443/", "a.frame.claudeusercontent.com"], ["wss://claudeusercontent.com.evil", "claudeusercontent.com.evil"]]) {
+    pacContext.testURL = url; pacContext.testHost = host;
+    assert.equal(vm.runInContext('FindProxyForURL(testURL, testHost)', pacContext), "HTTPS 127.0.0.1:9", url);
+  }
   for (const url of ["https://gateway.example.test.evil/", "http://gateway.example.test/", "https://gateway.example.test:8443/", "https://a.frame.claudeusercontent.com:8443/", "http://esm.sh/"]) {
     pacContext.testURL = url;
-    assert.equal(vm.runInContext('FindProxyForURL(testURL, "irrelevant")', pacContext), "HTTPS 127.0.0.1:9");
+    assert.equal(vm.runInContext('FindProxyForURL(testURL, new URL(testURL).hostname)', pacContext), "HTTPS 127.0.0.1:9", url);
   }
 });
 
