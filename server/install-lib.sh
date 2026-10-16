@@ -58,8 +58,11 @@ render_caddy() {
     }
     {print}' "$3" > "$4"
 }
+# The password goes to Caddy on stdin, never on a command line that `ps` shows.
 hash_password() {
-  hash_output=$(docker run --rm caddy:2.11.7 caddy hash-password --plaintext "$1" 2>/dev/null) || { echo 'Error: password hashing failed.' >&2; return 1; }
+  case "$1" in *"
+"*) echo 'Error: password must not contain a newline.' >&2; return 1;; esac
+  hash_output=$(printf '%s\n' "$1" | docker run --rm -i caddy:2.11.7 caddy hash-password 2>/dev/null) || { echo 'Error: password hashing failed.' >&2; return 1; }
   case "$hash_output" in *[!a-zA-Z0-9./\$]*) echo 'Error: invalid bcrypt hash returned.' >&2; return 1;; esac
   printf '%s\n' "$hash_output" | awk 'length($0)==60 && /^\$2[aby]\$[0-9][0-9]\$/ {valid=1} END {exit !valid}' || { echo 'Error: invalid bcrypt hash returned.' >&2; return 1; }
   printf '%s' "$hash_output"
@@ -76,3 +79,30 @@ validate_caddy() (
     exit 1
   fi
 )
+# Rewrite the Caddyfile in place: compose bind-mounts this exact file (inode),
+# so a renamed replacement would stay invisible to a graceful reload.
+install_caddyfile() (
+  umask 077
+  cp Caddyfile .Caddyfile.prev
+  trap 'rm -f .Caddyfile.prev' EXIT HUP INT TERM
+  if ! cat "$1" > Caddyfile || [ "$(cksum < "$1")" != "$(cksum < Caddyfile)" ]; then
+    cat .Caddyfile.prev > Caddyfile
+    echo 'Error: cannot write Caddyfile; previous version kept.' >&2
+    exit 1
+  fi
+  chmod 600 Caddyfile
+)
+# Graceful reload over Caddy's private admin socket keeps every other user's
+# connections open; a restart is the fallback (first run after an update).
+reload_caddy() {
+  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 \
+    || docker compose restart caddy >&2
+}
+# The gateway's operator API listens on the container's loopback only.
+gateway_admin() {
+  docker compose exec -T gateway node -e '
+    const [method, path] = process.argv.slice(1);
+    fetch("http://127.0.0.1:" + (process.env.ADMIN_PORT || 8089) + path, { method, signal: AbortSignal.timeout(10000) })
+      .then(async r => { process.stdout.write(await r.text()); if (!r.ok) process.exitCode = 1; })
+      .catch(() => { process.exitCode = 2; });' "$1" "$2"
+}

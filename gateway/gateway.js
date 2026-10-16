@@ -14,6 +14,12 @@
 //   the magic-link login. Set-Cookie headers from claude.ai are stored in the user's
 //   jar and are NEVER forwarded to the browser.
 //
+// Encryption at rest
+//   Each jar is sealed with a key derived from that user's own gateway password
+//   (see "encryption at rest" below). The key exists only in memory while the
+//   user is active, so cookie files, backups and disk snapshots are useless
+//   without the password.
+//
 // What this file deliberately does (see SECURITY.md)
 //   * strips every header that could reveal the real client (IP, country, proxy chain)
 //   * strips Authorization (claude.ai rejects "auth header + session cookie")
@@ -47,8 +53,14 @@ const cfg = {
   // User-Agent presented to claude.ai. Default: pass the browser's own UA (and client hints)
   // through unchanged so headers and navigator.* in the page stay consistent.
   fixedUA: process.env.FIXED_UA || "",
-  // AES-256-GCM key for cookie files at rest (optional but recommended)
+  // Legacy AES-256-GCM key (v1 jars). Jars move to password-derived keys (v2)
+  // on their user's next request; this key only reads the old format and
+  // seals jars for identity proxies that do not forward a password.
   cookiesKey: parseKey(process.env.COOKIES_KEY),
+  // A password-derived jar key leaves memory after this long without requests.
+  jarKeyIdleMs: parseInt(process.env.JAR_KEY_IDLE_MS || String(60 * 60 * 1000), 10),
+  // Loopback-only operator API used by server/admin.sh and the dashboard; 0 disables it.
+  adminPort: parseInt(process.env.ADMIN_PORT || "8089", 10),
   adminUsers: (process.env.ADMIN_USERS || "").split(",").map(x => x.trim()).filter(Boolean),
   extDir: process.env.EXT_DIR || "/ext",
   // brute-force protection (failed basic_auth attempts reported by Caddy)
@@ -122,7 +134,9 @@ function userFile(user) {
 }
 
 // -------------------------------------------------------------- cookie jar ----
-// jar entry: { mtime, cookies: Map(name -> {name,value,expires}) }
+// jar entry: { mtime, entry, format, locked, meta, cookies: Map(name -> {name,value,expires}) }
+//   format: "v2" (password key), "v1" (COOKIES_KEY) or "plain"
+//   locked: the jar is sealed with a key that is not in memory (no cookies available)
 
 const jars = new Map();
 
@@ -136,7 +150,22 @@ function safeError(error) {
   return typeof code === "string" && /^(?:E[A-Z0-9_]{1,60}|ERR_[A-Z0-9_]{1,60})$/.test(code) ? code : "operation failed";
 }
 
-// ---- optional encryption at rest (AES-256-GCM). Plain files are still readable (migration).
+// ---- encryption at rest
+// v2: AES-256-GCM under a key derived with scrypt from the user's own gateway
+//     password. Caddy has verified that password when a request reaches the
+//     gateway, and the derived key stays in memory only while the user is
+//     active. Without the password, cookie files, backups and disk snapshots
+//     cannot be decrypted, even together with .env.
+// v1: AES-256-GCM under COOKIES_KEY from .env, which sits on the same disk.
+//     Read so that jars move to v2 on their user's next request; still written
+//     when an identity proxy supplies no password.
+// Plain JSON is the oldest format; startup seals it as v1.
+const JAR_KDF = { N: 1 << 15, r: 8, p: 1 };
+const jarKeys = new Map();        // user -> { key, salt, verifier, usedAt }
+const jarKeyPending = new Map();  // user -> { verifier, promise }
+const verifierSecret = crypto.randomBytes(32);
+let kdfQueue = Promise.resolve();
+
 function seal(plain) {
   if (!cfg.cookiesKey) return plain;
   const iv = crypto.randomBytes(12);
@@ -149,7 +178,7 @@ function unseal(raw) {
   let d; try { d = JSON.parse(raw); } catch (e) { return raw; }
   if (!d || d.enc !== 1) return raw;
   if (!cfg.cookiesKey) throw new Error("jar is encrypted but COOKIES_KEY is not set");
-  const dc = crypto.createDecipheriv("aes-256-gcm", cfg.cookiesKey, Buffer.from(d.iv, "base64"));
+  const dc = crypto.createDecipheriv("aes-256-gcm", cfg.cookiesKey, Buffer.from(d.iv, "base64"), { authTagLength: 16 });
   dc.setAuthTag(Buffer.from(d.tag, "base64"));
   return Buffer.concat([dc.update(Buffer.from(d.data, "base64")), dc.final()]).toString("utf8");
 }
@@ -164,11 +193,102 @@ function migrateAll() {
     try {
       const raw = fs.readFileSync(file, "utf8");
       const d = raw.trim() ? JSON.parse(raw) : null;
-      if (d && d.enc === 1) continue;
+      if (d && (d.enc === 1 || d.enc === 2)) continue;
       const tmp = file + "." + process.pid + ".tmp";
       fs.writeFileSync(tmp, seal(raw.trim() ? raw : '{"cookies":[]}'), { mode: 0o600 });
       fs.renameSync(tmp, file); n++;
     } catch (e) { console.error("[cookies] migration failed: " + safeError(e)); }
+  }
+  return n;
+}
+
+// The user name and the plaintext metadata are authenticated: a jar copied to
+// another user's file, or edited metadata, fails to open.
+function jarAad(user, meta) { return Buffer.from("claude-gateway jar v2\0" + user + "\0" + JSON.stringify(meta), "utf8"); }
+function sealJar(user, plain, entry, meta) {
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv("aes-256-gcm", entry.key, iv);
+  c.setAAD(jarAad(user, meta));
+  const data = Buffer.concat([c.update(plain, "utf8"), c.final()]);
+  return JSON.stringify({ enc: 2, user, kdf: { name: "scrypt", N: JAR_KDF.N, r: JAR_KDF.r, p: JAR_KDF.p, salt: entry.salt.toString("base64") },
+    meta, iv: iv.toString("base64"), tag: c.getAuthTag().toString("base64"), data: data.toString("base64") });
+}
+function openJar(user, d, key) {
+  if (d.user !== user) throw new Error("jar belongs to another user");
+  const dc = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(String(d.iv), "base64"), { authTagLength: 16 });
+  dc.setAAD(jarAad(user, d.meta));
+  dc.setAuthTag(Buffer.from(String(d.tag), "base64"));
+  return Buffer.concat([dc.update(Buffer.from(String(d.data), "base64")), dc.final()]).toString("utf8");
+}
+function jarSalt(d) {
+  const k = d && d.enc === 2 && d.kdf;
+  if (!k || k.name !== "scrypt" || k.N !== JAR_KDF.N || k.r !== JAR_KDF.r || k.p !== JAR_KDF.p || typeof k.salt !== "string") return null;
+  const salt = Buffer.from(k.salt, "base64");
+  return salt.length === 16 ? salt : null;
+}
+function deriveJarKey(password, salt) {
+  const run = () => new Promise((resolve, reject) => crypto.scrypt(password, salt, 32, { ...JAR_KDF, maxmem: 64 * 1024 * 1024 },
+    (error, key) => error ? reject(error) : resolve(key)));
+  // One derivation at a time: each needs 32 MiB and the container has 256 MiB.
+  const result = kdfQueue.then(run, run);
+  kdfQueue = result.catch(() => {});
+  return result;
+}
+
+// Caddy forwards the Basic credentials it has just verified. Only a password
+// sent under the same user name as X-Remote-User is used.
+function basicPassword(header, user) {
+  const m = /^Basic +([A-Za-z0-9+/]{1,1400}={0,2})$/i.exec(String(header || ""));
+  if (!m || !user) return "";
+  const decoded = Buffer.from(m[1], "base64").toString("utf8");
+  const i = decoded.indexOf(":");
+  return i > 0 && decoded.slice(0, i) === user && i < decoded.length - 1 ? decoded.slice(i + 1) : "";
+}
+
+function readJarDoc(user) {
+  const file = userFile(user);
+  try { return file ? JSON.parse(fs.readFileSync(file, "utf8")) : null; } catch (_) { return null; }
+}
+
+// Makes the user's jar key available before the request is handled. Returns
+// null when nothing has to wait (no password, or the key is already in memory).
+function unlockJar(user, authorization, now = Date.now()) {
+  const password = basicPassword(authorization, user);
+  if (!password || !userFile(user)) return null;
+  const verifier = crypto.createHmac("sha256", verifierSecret).update(user + "\0" + password).digest();
+  const entry = jarKeys.get(user);
+  if (entry && crypto.timingSafeEqual(entry.verifier, verifier)) { entry.usedAt = now; return null; }
+  const pending = jarKeyPending.get(user);
+  if (pending && pending.verifier.equals(verifier)) return pending.promise;
+  const promise = (async () => {
+    const salt = jarSalt(readJarDoc(user)) || crypto.randomBytes(16);
+    const key = await deriveJarKey(password, salt);
+    // After a password reset the previous key, while still in memory, opens
+    // the jar once more so the Claude session survives under the new key.
+    const previous = jarKeys.has(user) ? loadJar(user) : null;
+    jarKeys.set(user, { key, salt, verifier, usedAt: Date.now() });
+    jars.delete(user);
+    const jar = loadJar(user);
+    if (!jar) return;
+    let from = "";
+    if (jar.format === "v1" || jar.format === "plain") from = jar.format;
+    else if (jar.locked && previous && !previous.locked && previous.format === "v2") { jar.cookies = previous.cookies; from = "previous password"; }
+    if (!from) return;
+    writeJar(user, userFile(user), jar);
+    console.log("[cookies] user=" + user + " jar sealed with the user's password key (was " + from + ")");
+  })();
+  jarKeyPending.set(user, { verifier, promise });
+  promise.then(() => {}, () => {}).then(() => { if (jarKeyPending.get(user) && jarKeyPending.get(user).promise === promise) jarKeyPending.delete(user); });
+  return promise;
+}
+
+// Keys and decrypted cookies of users without recent requests leave memory.
+function forgetJarKeys(now = Date.now()) {
+  let n = 0;
+  for (const [user, entry] of jarKeys) {
+    const s = stats.get(user);
+    if (now - entry.usedAt < cfg.jarKeyIdleMs || (s && s.ws.size)) continue;
+    jarKeys.delete(user); jars.delete(user); n++;
   }
   return n;
 }
@@ -178,14 +298,27 @@ function loadJar(user) {
   if (!file) return null;
   let st;
   try { st = fs.statSync(file); } catch (e) { return null; }
+  const entry = jarKeys.get(user) || null;
   const cached = jars.get(user);
-  if (cached && cached.mtime === st.mtimeMs) return cached;
-  const jar = { mtime: st.mtimeMs, cookies: new Map() };
+  if (cached && cached.mtime === st.mtimeMs && cached.entry === entry) return cached;
+  const jar = { mtime: st.mtimeMs, entry, format: "plain", locked: false, meta: null, cookies: new Map() };
   try {
-    const raw = unseal(fs.readFileSync(file, "utf8"));
+    let raw = fs.readFileSync(file, "utf8");
+    let d = null;
+    try { d = raw.trim() ? JSON.parse(raw) : null; } catch (_) { /* reported below */ }
+    if (d && d.enc === 2) {
+      jar.format = "v2";
+      jar.meta = d.meta && typeof d.meta === "object" ? d.meta : null;
+      raw = "";
+      try { if (entry) raw = openJar(user, d, entry.key); else jar.locked = true; }
+      catch (_) { jar.locked = true; }  // sealed under another password or damaged
+    } else if (d && d.enc === 1) {
+      jar.format = "v1";
+      raw = unseal(raw);
+    }
     if (raw.trim()) {
-      const d = JSON.parse(raw);
-      for (const c of (d.cookies || [])) {
+      const plain = JSON.parse(raw);
+      for (const c of (plain.cookies || [])) {
         if (c && typeof c.name === "string" && typeof c.value === "string") {
           jar.cookies.set(c.name, { name: c.name, value: c.value, expires: Number(c.expires) || 0 });
         }
@@ -196,6 +329,30 @@ function loadJar(user) {
   }
   jars.set(user, jar);
   return jar;
+}
+
+function writeJar(user, file, jar) {
+  const t = nowSec();
+  const cookies = Array.from(jar.cookies.values());
+  const entry = jarKeys.get(user) || null;
+  let data;
+  if (entry) {
+    const session = jar.cookies.get("sessionKey");
+    // Non-secret facts for operators while the jar is locked.
+    const meta = { saved_at: t, cookies: cookies.length, session: !!session, session_expires: session ? session.expires : 0 };
+    data = sealJar(user, JSON.stringify({ saved_at: t, cookies }), entry, meta);
+    Object.assign(jar, { format: "v2", locked: false, meta });
+  } else {
+    data = seal(JSON.stringify({ saved_at: t, cookies }, null, 2));
+    jar.format = cfg.cookiesKey ? "v1" : "plain";
+  }
+  fs.mkdirSync(cfg.cookiesDir, { recursive: true, mode: 0o700 });
+  const tmp = file + "." + process.pid + ".tmp";
+  fs.writeFileSync(tmp, data, { mode: 0o600 });
+  fs.renameSync(tmp, file);           // atomic replace
+  jar.entry = entry;
+  jar.mtime = fs.statSync(file).mtimeMs;
+  jars.set(user, jar);
 }
 
 function cookieHeaderFor(user) {
@@ -213,8 +370,11 @@ function cookieHeaderFor(user) {
 // Merge Set-Cookie headers from claude.ai into the user's jar (a tiny cookie-jar).
 function captureSetCookies(user, setCookies) {
   const file = userFile(user);
-  if (!file || !Array.isArray(setCookies) || !setCookies.length) return false;
-  const jar = loadJar(user) || { mtime: 0, cookies: new Map() };
+  if (!file || !Array.isArray(setCookies) || !setCookies.length || removedUsers.has(user)) return false;
+  const jar = loadJar(user) || { mtime: 0, entry: null, format: "plain", locked: false, meta: null, cookies: new Map() };
+  // A jar sealed with a key that is not in memory is never replaced. With the
+  // key in memory a locked jar belongs to a previous password and is replaced.
+  if (jar.locked && !jarKeys.has(user)) return false;
   let changed = false;
   const t = nowSec();
 
@@ -255,13 +415,7 @@ function captureSetCookies(user, setCookies) {
   if (!changed) return false;
 
   try {
-    fs.mkdirSync(cfg.cookiesDir, { recursive: true, mode: 0o700 });
-    const tmp = file + "." + process.pid + ".tmp";
-    const data = seal(JSON.stringify({ saved_at: t, cookies: Array.from(jar.cookies.values()) }, null, 2));
-    fs.writeFileSync(tmp, data, { mode: 0o600 });
-    fs.renameSync(tmp, file);           // atomic replace
-    jar.mtime = fs.statSync(file).mtimeMs;
-    jars.set(user, jar);
+    writeJar(user, file, jar);
     console.log("[cookies] user=" + user + " jar updated (" + jar.cookies.size + " cookies)");
     return true;
   } catch (e) {
@@ -272,18 +426,23 @@ function captureSetCookies(user, setCookies) {
 
 // ------------------------------------------------ session monitoring / alerts ----
 
-const stats = new Map(); // user -> { lastSeen, expired, alertedAt }
+// user -> { lastSeen, expired, alertedAt, inflight, ws: Set(socket), hours: [{ h, req, bytes }] }
+const stats = new Map();
 
 function hasSession(user) {
   const jar = loadJar(user);
   if (!jar) return false;
   const t = nowSec();
+  if (jar.locked) {
+    const m = jar.meta;
+    return !!(m && m.session) && !(m.session_expires > 0 && m.session_expires < t);
+  }
   const c = jar.cookies.get("sessionKey");
   return !!c && !(c.expires > 0 && c.expires < t);
 }
 function statOf(user) {
   let s = stats.get(user);
-  if (!s) { s = { lastSeen: 0, expired: false, alertedAt: 0 }; stats.set(user, s); }
+  if (!s) { s = { lastSeen: 0, expired: false, alertedAt: 0, inflight: 0, ws: new Set(), hours: [] }; stats.set(user, s); }
   return s;
 }
 function sessionState(user) {
@@ -319,13 +478,165 @@ function noteClaudeResponse(user, urlPath, status, sentSession) {
   }
 }
 
-function listUsers() {
+function listUsers(now = Date.now()) {
   let files = []; try { files = fs.readdirSync(cfg.cookiesDir); } catch (e) { /* none */ }
-  return files.filter(f => f.endsWith(".json")).map(f => f.slice(0, -5)).sort().map(u => {
+  return files.filter(f => f.endsWith(".json")).map(f => f.slice(0, -5)).filter(u => sanitizeUser(u) === u).sort().map(u => {
     const s = statOf(u);
     const jar = loadJar(u);
-    return { user: u, session: sessionState(u), cookies: jar ? jar.cookies.size : 0,
-      lastSeen: s.lastSeen ? new Date(s.lastSeen).toISOString() : null };
+    const day = s.hours.filter(e => now - e.h < 24 * 3600 * 1000);
+    return { user: u, session: sessionState(u),
+      cookies: jar ? (jar.locked ? (jar.meta && Number(jar.meta.cookies)) || 0 : jar.cookies.size) : 0,
+      encryption: jar ? jar.format : "none", unlocked: jarKeys.has(u),
+      savedAt: jar && jar.meta && jar.meta.saved_at ? new Date(jar.meta.saved_at * 1000).toISOString() : null,
+      lastSeen: s.lastSeen ? new Date(s.lastSeen).toISOString() : null,
+      active: { requests: s.inflight, websockets: s.ws.size, tunnels: userTunnels.get(u) || 0 },
+      requests24h: day.reduce((n, e) => n + e.req, 0), bytes24h: day.reduce((n, e) => n + e.bytes, 0) };
+  });
+}
+
+// ----------------------------------------------------------------- metrics ----
+// Counters and gauges for operators (server/admin.sh, dashboard). They hold no
+// paths, query strings, cookies, passwords or client addresses.
+
+const startedAt = Date.now();
+const HISTORY_MINUTES = 24 * 60;
+const HISTORY_FIELDS = ["t", "req", "s2", "s3", "s4", "s5", "r429", "upErr", "bytesIn", "bytesOut", "wsOpened", "tunnelsOpened",
+  "inflight", "ws", "tunnels", "users", "ttfbAvg", "ttfbMax", "lagP99", "lagMax"];
+const history = [];
+const live = { inflight: 0, ws: 0 };
+const totals = { req: 0, s5: 0, upErr: 0, bytesIn: 0, bytesOut: 0, wsOpened: 0, tunnelsOpened: 0 };
+let loopDelay = null;
+try { loopDelay = require("perf_hooks").monitorEventLoopDelay({ resolution: 20 }); loopDelay.enable(); } catch (_) { /* optional */ }
+
+function closeMinute(b) {
+  b.users = b.userSet.size; b.userSet = null;
+  if (loopDelay) {
+    b.lagP99 = Math.round(loopDelay.percentile(99) / 1e5) / 10;
+    b.lagMax = Math.round(loopDelay.max / 1e5) / 10;
+    loopDelay.reset();
+  }
+}
+function minute(now = Date.now()) {
+  const t = now - now % 60000;
+  let b = history[history.length - 1];
+  if (b && b.t === t) return b;
+  if (b) closeMinute(b);
+  b = { t, req: 0, s2: 0, s3: 0, s4: 0, s5: 0, r429: 0, upErr: 0, bytesIn: 0, bytesOut: 0, wsOpened: 0, tunnelsOpened: 0,
+    inflight: live.inflight, ws: live.ws, tunnels: activeTunnels, userSet: new Set(), users: 0, ttfbSum: 0, ttfbN: 0, ttfbMax: 0, lagP99: 0, lagMax: 0 };
+  history.push(b);
+  while (history.length > HISTORY_MINUTES) history.shift();
+  return b;
+}
+function gauge(b = minute()) {
+  b.inflight = Math.max(b.inflight, live.inflight);
+  b.ws = Math.max(b.ws, live.ws);
+  b.tunnels = Math.max(b.tunnels, activeTunnels);
+  return b;
+}
+function userHour(s, now = Date.now()) {
+  const h = now - now % 3600000;
+  let e = s.hours[s.hours.length - 1];
+  if (!e || e.h !== h) { e = { h, req: 0, bytes: 0 }; s.hours.push(e); while (s.hours.length > 25) s.hours.shift(); }
+  return e;
+}
+const metrics = {
+  requestStarted(user) {
+    const b = minute(); b.req++; totals.req++; live.inflight++; gauge(b);
+    if (user) { const s = statOf(user); b.userSet.add(user); s.inflight++; userHour(s).req++; }
+  },
+  requestFinished(user, status) {
+    live.inflight--;
+    if (user) statOf(user).inflight--;
+    if (!status) return;
+    const b = minute();
+    const cls = "s" + Math.min(5, Math.max(2, Math.floor(status / 100)));
+    b[cls]++;
+    if (status === 429) b.r429++;
+    if (status >= 500) totals.s5++;
+  },
+  bytes(user, received, sent) {
+    const b = minute();
+    b.bytesIn += received; b.bytesOut += sent; totals.bytesIn += received; totals.bytesOut += sent;
+    if (user) userHour(statOf(user)).bytes += received + sent;
+  },
+  upstreamError() { minute().upErr++; totals.upErr++; },
+  ttfb(ms) { const b = minute(); b.ttfbSum += ms; b.ttfbN++; b.ttfbMax = Math.max(b.ttfbMax, ms); },
+  wsOpened(user, socket) {
+    const b = minute(); live.ws++; b.wsOpened++; totals.wsOpened++; gauge(b);
+    const s = statOf(user); s.ws.add(socket); s.lastSeen = Date.now(); b.userSet.add(user);
+    socket.once("close", () => { live.ws--; s.ws.delete(socket); metrics.bytes(user, socket.bytesRead, socket.bytesWritten); });
+  },
+  tunnelOpened(user) { const b = minute(); b.tunnelsOpened++; totals.tunnelsOpened++; gauge(b); if (user) b.userSet.add(user); },
+};
+
+function historyRows(minutes) {
+  return history.slice(-Math.max(1, Math.min(HISTORY_MINUTES, minutes | 0))).map(b => HISTORY_FIELDS.map(f =>
+    f === "users" ? (b.userSet ? b.userSet.size : b.users) : f === "ttfbAvg" ? (b.ttfbN ? Math.round(b.ttfbSum / b.ttfbN) : 0) : b[f]));
+}
+
+function adminStatus(historyMinutes = 60, now = Date.now()) {
+  gauge(minute(now));
+  const users = listUsers(now);
+  const jarsByFormat = { v2: 0, v1: 0, plain: 0 };
+  for (const u of users) if (u.encryption in jarsByFormat) jarsByFormat[u.encryption]++;
+  const mem = process.memoryUsage();
+  return {
+    gateway: { startedAt: new Date(startedAt).toISOString(), uptimeSec: Math.round((now - startedAt) / 1000), node: process.version, publicHost: cfg.publicHost },
+    memory: { rss: mem.rss, heapUsed: mem.heapUsed, external: mem.external },
+    now: { inflight: live.inflight, websockets: live.ws, tunnels: activeTunnels, proxySessions: proxySessions.size, jarKeysInMemory: jarKeys.size,
+      lagP99: loopDelay ? Math.round(loopDelay.percentile(99) / 1e5) / 10 : null, connectReady: connectReady() },
+    limits: { tunnels: cfg.connectMaxTunnels, tunnelsPerUser: cfg.connectMaxPerUser, proxySessions: cfg.proxySessionLimit, cacheBytes: cfg.cacheMaxBytes },
+    totals,
+    history: { fields: HISTORY_FIELDS, rows: historyRows(historyMinutes) },
+    users,
+    bans: Array.from(fails).filter(([, f]) => f.bannedUntil > now).map(([ip, f]) => ({ ip, until: new Date(f.bannedUntil).toISOString() })),
+    cache: { items: cache.size, bytes: cacheBytes },
+    encryption: { jars: jarsByFormat, legacyKey: !!cfg.cookiesKey, kdf: "scrypt N=" + JAR_KDF.N + " r=" + JAR_KDF.r + " p=" + JAR_KDF.p,
+      keyIdleMinutes: Math.round(cfg.jarKeyIdleMs / 60000) },
+  };
+}
+
+// Ends a user's live access without restarting the gateway: CONNECT tokens and
+// their tunnels, open WebSockets and every WebSocket cookie issued so far.
+// With forget, the jar key and decrypted cookies also leave memory.
+const wsRevokedAt = new Map(); // user -> unix seconds
+// Removed users: responses still in flight must not write a new jar. Cleared
+// when the user authenticates again (Caddy only lets re-added users through).
+const removedUsers = new Set();
+function revokeUser(user, forget) {
+  let tokens = 0, websockets = 0;
+  for (const [digest, session] of proxySessions) if (session.user === user) { revokeProxySession(digest); tokens++; }
+  const s = stats.get(user);
+  if (s) for (const socket of s.ws) { socket.destroy(); websockets++; }
+  wsRevokedAt.set(user, nowSec());
+  if (forget) { jarKeys.delete(user); jarKeyPending.delete(user); jars.delete(user); stats.delete(user); removedUsers.add(user); }
+  return { user, tokens, websockets, forgotten: !!forget };
+}
+
+// A second listener on the container's loopback interface: nothing on the
+// docker network (Caddy, front door) reaches it. Operators use it through
+// `docker compose exec gateway` (server/admin.sh).
+function createAdminServer() {
+  return http.createServer((req, res) => {
+    const from = req.socket.remoteAddress;
+    if (from !== "127.0.0.1" && from !== "::1" && from !== "::ffff:127.0.0.1") { res.writeHead(403); return res.end(); }
+    let url;
+    try { url = new URL(req.url, "http://127.0.0.1"); } catch (_) { return json(res, 400, { error: "bad_request" }); }
+    if (req.method === "GET" && url.pathname === "/status") {
+      return json(res, 200, adminStatus(parseInt(url.searchParams.get("history") || "60", 10) || 60));
+    }
+    let m = /^\/users\/([^/]+)\/revoke$/.exec(url.pathname);
+    if (req.method === "POST" && m) {
+      const name = decodeURIComponent(m[1]), user = sanitizeUser(name);
+      if (!user || user !== name) return json(res, 400, { error: "invalid_user" });
+      return json(res, 200, revokeUser(user, url.searchParams.get("forget") === "1"));
+    }
+    m = /^\/bans\/([^/]+)\/clear$/.exec(url.pathname);
+    if (req.method === "POST" && m) {
+      const ip = cleanIp(decodeURIComponent(m[1]));
+      return json(res, 200, { ip, cleared: ip !== "unknown" && fails.delete(ip) });
+    }
+    json(res, 404, { error: "not_found" });
   });
 }
 
@@ -631,7 +942,10 @@ function wsCookieUser(cookieHeader, now = Date.now()) {
     try {
       const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
       const user = sanitizeUser(data.u);
-      if (user && user === data.u && Number.isSafeInteger(data.e) && data.e * 1000 > now) return user;
+      // Cookies issued before revokeUser() ran for this user are void.
+      const revokedAt = wsRevokedAt.get(user);
+      if (user && user === data.u && Number.isSafeInteger(data.e) && data.e * 1000 > now
+          && !(revokedAt !== undefined && data.e - WS_COOKIE_MAX_AGE <= revokedAt)) return user;
     } catch (_) { /* malformed payload */ }
   }
   return "";
@@ -673,6 +987,7 @@ function handleUpgrade(req, socket) {
     psock.on("close", () => socket.destroy());
     socket.on("close", () => psock.destroy());
     psock.pipe(socket); socket.pipe(psock);
+    metrics.wsOpened(user, socket);
     console.log("[ws] " + (user || "-") + " " + t.host + " " + redactPath(t.urlPath) + " -> 101");
   });
   preq.on("response", (pres) => {
@@ -706,145 +1021,164 @@ function createServer() {
       res.writeHead(banned ? 429 : 401); return res.end();
     }
     const user = sanitizeUser(req.headers["x-remote-user"]);
-    if (pathOnly === "/__health") {
-      return json(res, 200, { ok: true, users: jars.size, user: user, session: user ? sessionState(user) : "none", connectProxy: connectReady() ? "https://" + proxyEndpoint().host + ":" + proxyEndpoint().port : null, connectReady: connectReady() });
-    }
-    if (pathOnly === "/__proxy-session") {
-      if (req.method !== "POST") { res.setHeader("allow", "POST"); return json(res, 405, { error: "method_not_allowed" }); }
-      if (!user || user !== req.headers["x-remote-user"]) return json(res, 401, { error: "unauthorized" });
-      if (req.headers["x-gateway-proxy-session"] !== "1" || (req.headers.origin && req.headers.origin !== "https://" + cfg.publicHost && !/^(?:chrome-extension|moz-extension):\/\/[a-zA-Z0-9-]+$/.test(req.headers.origin))) return json(res, 403, { error: "forbidden_origin" });
-      const previousToken = req.headers["x-gateway-previous-proxy-token"];
-      if (previousToken !== undefined && (typeof previousToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(previousToken))) return json(res, 400, { error: "invalid_previous_token" });
-      if (!connectReady()) return json(res, 503, { error: "secure_proxy_unavailable" });
-      const session = mintProxySession(user, Date.now(), previousToken);
-      return json(res, session ? 200 : 503, session || { error: "session_capacity" });
-    }
-    if (pathOnly === "/__admin/status") {
-      if (!user || !cfg.adminUsers.includes(user)) { res.writeHead(403); return res.end("forbidden"); }
-      return json(res, 200, { users: listUsers(), cacheItems: cache.size, cacheBytes: cacheBytes, bannedIps: Array.from(fails.values()).filter(f => f.bannedUntil > Date.now()).length });
-    }
-    if (pathOnly === "/__ext" || pathOnly.startsWith("/__ext/")) {
-      if (!user) { res.writeHead(401); return res.end(); }
-      return serveExt(req, res);
-    }
-
-    const t = resolveTarget(req.url);
-    if (!t) { res.writeHead(/^\/p\//.test(req.url) ? 403 : 400); return res.end("not allowed"); }
-    const host = t.host, urlPath = t.urlPath;
-    const sendsCookies = COOKIE_HOSTS.has(host);
-    const cookieHeader = sendsCookies ? cookieHeaderFor(user) : "";
-    const sentSession = cookieHeader.includes("sessionKey=");
-    const headers = buildUpstreamHeaders(req.headers, host, cookieHeader);
-    // Rewritten documents, scripts and styles differ from upstream's bytes, so
-    // upstream validators must not answer for them: a 304 kept stale or
-    // corrupted copies alive in browsers and in Cloudflare's cache.
-    if (likelyRewritten(req.headers, urlPath)) { delete headers["if-modified-since"]; delete headers["if-none-match"]; }
-    const logPath = redactPath(urlPath);
-    if (user) statOf(user).lastSeen = Date.now();
-
-    const cacheable = req.method === "GET" && CACHE_HOSTS.has(host) && !req.headers["range"];
-    const cacheKey = host + urlPath;
-    if (cacheable) {
-      const hit = cacheGet(cacheKey);
-      if (hit) {
-        res.writeHead(hit.status, withWsCookie(Object.assign({}, hit.headers, { "content-length": hit.body.length, "x-cache": "HIT" }), user, req.headers.cookie));
-        return res.end(hit.body);
-      }
-    }
-
-    const proxyReq = https.request({ hostname: host, port: 443, path: urlPath, method: req.method, headers }, (up) => {
-      const rh = buildResponseHeaders(up.headers);
-      const failResponse = () => {
-        if (res.destroyed || res.writableEnded) return;
-        if (res.headersSent) res.destroy();
-        else { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); }
-      };
-      up.once("error", failResponse);
-      up.once("aborted", failResponse);
-      res.once("close", () => { if (!up.complete) up.destroy(); });
-
-      if (sendsCookies && user) {
-        const had = hasSession(user);
-        if (up.headers["set-cookie"]) {
-          captureSetCookies(user, up.headers["set-cookie"]);
-          const st = statOf(user);
-          if (hasSession(user)) st.expired = false;
-          else if (had) notify("ℹ️ Claude gateway: сессия пользователя «" + user + "» завершена (выход/удаление cookie).");
-        }
-        noteClaudeResponse(user, urlPath, up.statusCode, sentSession);
-      }
-      if (rh["content-security-policy"]) rh["content-security-policy"] = rewriteCsp(rh["content-security-policy"]);
-      const rewriteHeader = (v) => Array.isArray(v) ? v.map(rewriteUrls) : rewriteUrls(v);
-      if (rh["location"]) rh["location"] = Array.isArray(rh["location"])
-        ? rh["location"].map(value => rewriteLocation(value, host, urlPath)) : rewriteLocation(rh["location"], host, urlPath);
-      if (rh["link"]) rh["link"] = rewriteHeader(rh["link"]);
-
-      const ct = String(rh["content-type"] || "");
-      const preserveBody = req.method === "HEAD" || [204, 205, 304].includes(up.statusCode) || up.statusCode === 206 || !!req.headers.range || !!rh["content-range"]
-        || /^\s*attachment\s*(?:;|$)/i.test(String(rh["content-disposition"] || ""));
-      const rewritable = !preserveBody && (ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript"));
-      const cl = parseInt(up.headers["content-length"] || "0", 10);
-      const canCache = cacheable && up.statusCode === 200 && cl > 0 && cl <= cfg.cacheMaxItem;
-
-      if (!rewritable && !canCache) {
-        if (up.headers["content-length"]) rh["content-length"] = up.headers["content-length"];
-        edgeHeaders(rh, host);
-        console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode);
-        res.writeHead(up.statusCode, withWsCookie(rh, user, req.headers.cookie));
-        up.pipe(res);
-        return;
-      }
-      const chunks = []; let size = 0, aborted = false;
-      up.on("data", (c) => {
-        size += c.length;
-        if (size > cfg.maxRewriteBytes) { aborted = true; up.destroy(); if (!res.headersSent) { res.writeHead(502); } res.end(); return; }
-        chunks.push(c);
-      });
-      up.on("end", async () => {
-        if (aborted || res.destroyed || res.writableEnded) return;
-        try {
-          let body = Buffer.concat(chunks);
-          if (rewritable) {
-            body = await decodeRewriteBody(body, up.headers["content-encoding"]);
-            if (res.destroyed || res.writableEnded) return;
-            body = rewriteBody(body, ct);
-            if (body.length > cfg.maxRewriteBytes) return failResponse();
-            // Rewritten bytes form a new identity representation, so origin byte
-            // validators and range support no longer describe the response.
-            for (const name of ["content-encoding", "etag", "last-modified", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
-            rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
-          }
-          edgeHeaders(rh, host);
-          rh["content-length"] = body.length;
-          if (canCache) {
-            const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
-            cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
-          }
-          console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
-          // After cachePut: the shared cache must never hold a per-user cookie.
-          res.writeHead(up.statusCode, withWsCookie(rh, user, req.headers.cookie));
-          res.end(body);
-        } catch (_) {
-          failResponse();
-        }
-      });
+    metrics.requestStarted(user);
+    res.once("close", () => metrics.requestFinished(user, res.headersSent ? res.statusCode : 0));
+    // The jar key comes from the Basic password Caddy has just verified.
+    if (user && removedUsers.has(user) && basicPassword(req.headers.authorization, user)) removedUsers.delete(user);
+    const unlocking = user ? unlockJar(user, req.headers.authorization) : null;
+    if (!unlocking) return handleRequest(req, res, pathOnly, user);
+    unlocking.then(() => { if (!res.destroyed) handleRequest(req, res, pathOnly, user); }, () => {
+      console.error("[cookies] user=" + user + " jar key derivation failed");
+      if (!res.headersSent) json(res, 503, { error: "jar_unavailable" });
     });
-
-    proxyReq.setTimeout(cfg.upstreamIdleMs, () => proxyReq.destroy(new Error("upstream idle timeout")));
-    let clientGone = false;
-    proxyReq.on("error", (e) => {
-      // A browser that navigated away aborts the request; that is not an upstream fault.
-      if (!clientGone) console.error("[upstream] " + host + " " + logPath + " " + safeError(e));
-      if (!res.headersSent) { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); } else res.destroy();
-    });
-    req.on("aborted", () => { clientGone = true; proxyReq.destroy(); });
-    res.once("close", () => { if (!res.writableEnded) { clientGone = true; proxyReq.destroy(); } });
-    req.pipe(proxyReq); // stream the body — no buffering of uploads
   });
   server.on("upgrade", handleUpgrade);
   // Never accept proxy credentials or tunnels on the internal HTTP listener.
   server.on("connect", (req, socket) => socket.end("HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"));
   return server;
+}
+
+function handleRequest(req, res, pathOnly, user) {
+  if (pathOnly === "/__health") {
+    return json(res, 200, { ok: true, users: jars.size, user: user, session: user ? sessionState(user) : "none", connectProxy: connectReady() ? "https://" + proxyEndpoint().host + ":" + proxyEndpoint().port : null, connectReady: connectReady() });
+  }
+  if (pathOnly === "/__proxy-session") {
+    if (req.method !== "POST") { res.setHeader("allow", "POST"); return json(res, 405, { error: "method_not_allowed" }); }
+    if (!user || user !== req.headers["x-remote-user"]) return json(res, 401, { error: "unauthorized" });
+    if (req.headers["x-gateway-proxy-session"] !== "1" || (req.headers.origin && req.headers.origin !== "https://" + cfg.publicHost && !/^(?:chrome-extension|moz-extension):\/\/[a-zA-Z0-9-]+$/.test(req.headers.origin))) return json(res, 403, { error: "forbidden_origin" });
+    const previousToken = req.headers["x-gateway-previous-proxy-token"];
+    if (previousToken !== undefined && (typeof previousToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(previousToken))) return json(res, 400, { error: "invalid_previous_token" });
+    if (!connectReady()) return json(res, 503, { error: "secure_proxy_unavailable" });
+    const session = mintProxySession(user, Date.now(), previousToken);
+    return json(res, session ? 200 : 503, session || { error: "session_capacity" });
+  }
+  if (pathOnly === "/__admin/status") {
+    if (!user || !cfg.adminUsers.includes(user)) { res.writeHead(403); return res.end("forbidden"); }
+    return json(res, 200, { users: listUsers(), cacheItems: cache.size, cacheBytes: cacheBytes, bannedIps: Array.from(fails.values()).filter(f => f.bannedUntil > Date.now()).length });
+  }
+  if (pathOnly === "/__ext" || pathOnly.startsWith("/__ext/")) {
+    if (!user) { res.writeHead(401); return res.end(); }
+    return serveExt(req, res);
+  }
+
+  const t = resolveTarget(req.url);
+  if (!t) { res.writeHead(/^\/p\//.test(req.url) ? 403 : 400); return res.end("not allowed"); }
+  const host = t.host, urlPath = t.urlPath;
+  const sendsCookies = COOKIE_HOSTS.has(host);
+  const cookieHeader = sendsCookies ? cookieHeaderFor(user) : "";
+  const sentSession = cookieHeader.includes("sessionKey=");
+  const headers = buildUpstreamHeaders(req.headers, host, cookieHeader);
+  // Rewritten documents, scripts and styles differ from upstream's bytes, so
+  // upstream validators must not answer for them: a 304 kept stale or
+  // corrupted copies alive in browsers and in Cloudflare's cache.
+  if (likelyRewritten(req.headers, urlPath)) { delete headers["if-modified-since"]; delete headers["if-none-match"]; }
+  const logPath = redactPath(urlPath);
+  if (user) statOf(user).lastSeen = Date.now();
+
+  const cacheable = req.method === "GET" && CACHE_HOSTS.has(host) && !req.headers["range"];
+  const cacheKey = host + urlPath;
+  if (cacheable) {
+    const hit = cacheGet(cacheKey);
+    if (hit) {
+      res.writeHead(hit.status, withWsCookie(Object.assign({}, hit.headers, { "content-length": hit.body.length, "x-cache": "HIT" }), user, req.headers.cookie));
+      metrics.bytes(user, 0, hit.body.length);
+      return res.end(hit.body);
+    }
+  }
+
+  const sentAt = Date.now();
+  const proxyReq = https.request({ hostname: host, port: 443, path: urlPath, method: req.method, headers }, (up) => {
+    metrics.ttfb(Date.now() - sentAt);
+    // Attached in the same tick as pipe()/the buffering listener below.
+    up.on("data", chunk => metrics.bytes(user, 0, chunk.length));
+    const rh = buildResponseHeaders(up.headers);
+    const failResponse = () => {
+      if (res.destroyed || res.writableEnded) return;
+      if (res.headersSent) res.destroy();
+      else { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); }
+    };
+    up.once("error", failResponse);
+    up.once("aborted", failResponse);
+    res.once("close", () => { if (!up.complete) up.destroy(); });
+
+    if (sendsCookies && user) {
+      const had = hasSession(user);
+      if (up.headers["set-cookie"]) {
+        captureSetCookies(user, up.headers["set-cookie"]);
+        const st = statOf(user);
+        if (hasSession(user)) st.expired = false;
+        else if (had) notify("ℹ️ Claude gateway: сессия пользователя «" + user + "» завершена (выход/удаление cookie).");
+      }
+      noteClaudeResponse(user, urlPath, up.statusCode, sentSession);
+    }
+    if (rh["content-security-policy"]) rh["content-security-policy"] = rewriteCsp(rh["content-security-policy"]);
+    const rewriteHeader = (v) => Array.isArray(v) ? v.map(rewriteUrls) : rewriteUrls(v);
+    if (rh["location"]) rh["location"] = Array.isArray(rh["location"])
+      ? rh["location"].map(value => rewriteLocation(value, host, urlPath)) : rewriteLocation(rh["location"], host, urlPath);
+    if (rh["link"]) rh["link"] = rewriteHeader(rh["link"]);
+
+    const ct = String(rh["content-type"] || "");
+    const preserveBody = req.method === "HEAD" || [204, 205, 304].includes(up.statusCode) || up.statusCode === 206 || !!req.headers.range || !!rh["content-range"]
+      || /^\s*attachment\s*(?:;|$)/i.test(String(rh["content-disposition"] || ""));
+    const rewritable = !preserveBody && (ct.includes("text/html") || ct.includes("text/css") || ct.includes("javascript"));
+    const cl = parseInt(up.headers["content-length"] || "0", 10);
+    const canCache = cacheable && up.statusCode === 200 && cl > 0 && cl <= cfg.cacheMaxItem;
+
+    if (!rewritable && !canCache) {
+      if (up.headers["content-length"]) rh["content-length"] = up.headers["content-length"];
+      edgeHeaders(rh, host);
+      console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode);
+      res.writeHead(up.statusCode, withWsCookie(rh, user, req.headers.cookie));
+      up.pipe(res);
+      return;
+    }
+    const chunks = []; let size = 0, aborted = false;
+    up.on("data", (c) => {
+      size += c.length;
+      if (size > cfg.maxRewriteBytes) { aborted = true; up.destroy(); if (!res.headersSent) { res.writeHead(502); } res.end(); return; }
+      chunks.push(c);
+    });
+    up.on("end", async () => {
+      if (aborted || res.destroyed || res.writableEnded) return;
+      try {
+        let body = Buffer.concat(chunks);
+        if (rewritable) {
+          body = await decodeRewriteBody(body, up.headers["content-encoding"]);
+          if (res.destroyed || res.writableEnded) return;
+          body = rewriteBody(body, ct);
+          if (body.length > cfg.maxRewriteBytes) return failResponse();
+          // Rewritten bytes form a new identity representation, so origin byte
+          // validators and range support no longer describe the response.
+          for (const name of ["content-encoding", "etag", "last-modified", "content-md5", "digest", "content-digest", "repr-digest", "accept-ranges"]) delete rh[name];
+          rh["cache-control"] = ct.includes("text/html") ? "no-cache, no-store, must-revalidate" : "public, max-age=86400";
+        }
+        edgeHeaders(rh, host);
+        rh["content-length"] = body.length;
+        if (canCache) {
+          const stored = Object.assign({}, rh); delete stored["date"]; delete stored["age"];
+          cachePut(cacheKey, { status: up.statusCode, headers: stored, body: body });
+        }
+        console.log("[resp] " + (user || "-") + " " + host + " " + logPath + " -> " + up.statusCode + (rewritable ? " (rewritten)" : ""));
+        // After cachePut: the shared cache must never hold a per-user cookie.
+        res.writeHead(up.statusCode, withWsCookie(rh, user, req.headers.cookie));
+        res.end(body);
+      } catch (_) {
+        failResponse();
+      }
+    });
+  });
+
+  proxyReq.setTimeout(cfg.upstreamIdleMs, () => proxyReq.destroy(new Error("upstream idle timeout")));
+  let clientGone = false;
+  proxyReq.on("error", (e) => {
+    // A browser that navigated away aborts the request; that is not an upstream fault.
+    if (!clientGone) { console.error("[upstream] " + host + " " + logPath + " " + safeError(e)); metrics.upstreamError(); }
+    if (!res.headersSent) { res.writeHead(502, { "content-type": "text/plain" }); res.end("bad gateway"); } else res.destroy();
+  });
+  req.on("aborted", () => { clientGone = true; proxyReq.destroy(); });
+  res.once("close", () => { if (!res.writableEnded) { clientGone = true; proxyReq.destroy(); } });
+  req.on("data", chunk => metrics.bytes(user, chunk.length, 0));
+  req.pipe(proxyReq); // stream the body — no buffering of uploads
 }
 
 // Artifact iframes must keep their real origin (postMessage checks it) while the
@@ -986,6 +1320,7 @@ function handleConnect(req, socket, head) {
     // otherwise rapidly disconnected clients could enqueue unlimited DNS work.
     if (released || resolving) return;
     released = true; activeTunnels--; session.tunnels--;
+    metrics.bytes(session.user, socket.bytesRead, socket.bytesWritten);
     session.sockets.delete(socket);
     const count = userTunnels.get(session.user) - 1;
     if (count) userTunnels.set(session.user, count); else userTunnels.delete(session.user);
@@ -998,6 +1333,7 @@ function handleConnect(req, socket, head) {
     if (socket.destroyed) return;
     up = net.connect({ port: 443, host: address.address, family: address.family }, () => {
       clearTimeout(dialDeadline);
+      metrics.tunnelOpened(session.user);
       socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head && head.length) up.write(head);
       up.pipe(socket); socket.pipe(up);
@@ -1053,6 +1389,7 @@ function startConnectListener({ retryMs = 30000 } = {}) {
 
 module.exports = {
   cfg, ALLOWED_HOSTS, COOKIE_HOSTS, CONNECT_DEPENDENCY_HOSTS, startConnectListener,
+  unlockJar, forgetJarKeys, basicPassword, jarKeys, adminStatus, revokeUser, createAdminServer, metrics, HISTORY_FIELDS,
   mintProxySession, verifyProxyAuth, proxyEndpoint, connectReady, isPublicAddress, resolveConnectAddress,
   sanitizeUser, userFile, loadJar, cookieHeaderFor, captureSetCookies,
   buildUpstreamHeaders, buildResponseHeaders, rewriteBody, rewriteCsp, rewriteUrls, redactPath, createServer, createConnectServer, allowedHost, isArtifactProxyHost, isChallengeHost, parseConnectTarget, edgeHeaders, likelyRewritten, wsCookieHeader, wsCookieUser, withWsCookie, resolveTarget, rewriteLocation,
@@ -1062,10 +1399,14 @@ module.exports = {
 if (require.main === module) {
   const n = migrateAll();
   if (n) console.log("[cookies] encrypted " + n + " plain jar(s)");
-  console.log("[gateway] cookies at rest: " + (cfg.cookiesKey ? "encrypted" : "PLAIN (set COOKIES_KEY)") +
+  console.log("[gateway] cookies at rest: sealed with each user's password key" +
+    (cfg.cookiesKey ? " (legacy key present)" : " (no legacy key: password-less jars stay PLAIN)") +
     "; telegram: " + (cfg.tgToken ? "on" : "off") + "; admins: " + (cfg.adminUsers.join(",") || "-"));
   createServer().listen(cfg.port, cfg.listen, () =>
     console.log("[gateway] listening on " + cfg.listen + ":" + cfg.port + " public host " + cfg.publicHost));
+  if (cfg.adminPort) createAdminServer().listen(cfg.adminPort, "127.0.0.1");
+  setInterval(() => gauge(minute()), 15000).unref();
+  setInterval(forgetJarKeys, 5 * 60 * 1000).unref();
   if (cfg.connectPort) {
     startConnectListener();
   }

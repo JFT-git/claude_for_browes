@@ -105,7 +105,7 @@ mkdir -p "$DEPLOY_DIR/gateway/src" "$DEPLOY_DIR/gateway/cookies" "$DEPLOY_DIR/ex
 chmod 700 "$DEPLOY_DIR/gateway/cookies" "$DEPLOY_DIR/backups"
 cp server/compose.yaml server/port443-mux.py server/privacy.html "$DEPLOY_DIR/"
 cp gateway/gateway.js "$DEPLOY_DIR/gateway/src/gateway.js"
-cp server/add-user.sh server/remove-user.sh server/install-lib.sh server/backup.sh server/restore.sh "$DEPLOY_DIR/"
+cp server/add-user.sh server/remove-user.sh server/admin.sh server/install-lib.sh server/backup.sh server/restore.sh "$DEPLOY_DIR/"
 chmod +x "$DEPLOY_DIR"/*.sh
 cp extension/dist/claude-gateway-chrome.zip extension/dist/claude-gateway-firefox.zip "$DEPLOY_DIR/extension/"
 cp "$TMP/.env" "$DEPLOY_DIR/.env"
@@ -138,4 +138,4 @@ docker compose up -d
 docker compose ps
 CODE_NOAUTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 "https://$DOMAIN/__health" || true)
 echo "/__health без пароля: $CODE_NOAUTH (ожидаем 401; первая выдача сертификата может занять время)."
-printf 'Готово: https://%s/\nРасширения: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"
+printf 'Готово: https://%s/\nРасширения: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\nДашборд на своём компьютере: node dashboard/dashboard.js root@<сервер> (см. docs/DASHBOARD.md)\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"
