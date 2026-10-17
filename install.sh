@@ -137,7 +137,12 @@ confirm 'Запустить контейнеры?' || { echo 'Файлы гот�
 cd "$DEPLOY_DIR"
 docker compose pull
 docker compose up -d
+# gateway.js, port443-mux.py and the Caddyfile are bind-mounted: running
+# processes keep the previous version until they restart. Caddy reloads
+# gracefully when its admin socket is up and restarts otherwise.
+docker compose restart gateway frontdoor
+reload_caddy
 docker compose ps
 CODE_NOAUTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 "https://$DOMAIN/__health" || true)
 echo "/__health без пароля: $CODE_NOAUTH (ожидаем 401; первая выдача сертификата может занять время)."
-printf 'Готово: https://%s/\nРасширения: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\nДашборд на своём компьютере: node dashboard/dashboard.js root@<сервер> (см. docs/DASHBOARD.md)\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"
+printf 'Готово: https://%s/\nРасширения: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\nПанель на своём компьютере: dashboard/start.command или node dashboard/dashboard.js root@<сервер> (docs/DASHBOARD.md)\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"

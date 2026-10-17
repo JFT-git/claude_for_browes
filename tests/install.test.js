@@ -63,6 +63,9 @@ test('fresh install deploys TLS stack, private cookies/backups and cron without 
   success(spawnSync('sh', ['-c', cron.replace(/^17 3 \* \* \* root /, '')], {encoding: 'utf8', env: f.env}));
   assert.match(read(path.join(f.deploy, 'backups/backup.log')), /backup-stub/);
   const calls = read(f.env.DOCKER_LOG); assert.ok(calls.indexOf('validate') < calls.indexOf('compose up'));
+  // Upgrades replace bind-mounted code; the running processes must pick it up.
+  assert.ok(calls.indexOf('compose up') < calls.indexOf('compose restart gateway frontdoor'));
+  assert.ok(calls.indexOf('compose restart gateway frontdoor') < calls.indexOf('compose exec -T caddy caddy reload'));
 });
 test('rerun preserves cookie encryption key, env secrets/admins and exact dotted auth users', t => {
   const f = fixture(t); success(f.fresh());

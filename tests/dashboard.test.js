@@ -58,6 +58,21 @@ test("arguments: ssh destination and directory cannot inject options or paths", 
   assert.ok(args.includes("BatchMode=yes"));
 });
 
+test("a remembered server fills in only when no destination is given", () => {
+  const saved = { target: "root@203.0.113.10", dir: "/srv/claude" };
+  assert.deepEqual(d.withSaved(["--port", "9000"], saved), ["root@203.0.113.10", "--dir", "/srv/claude", "--port", "9000"]);
+  assert.deepEqual(d.withSaved(["other@host"], saved), ["other@host"]);
+  assert.deepEqual(d.withSaved(["--dir", "/opt/x"], saved), ["root@203.0.113.10", "--dir", "/opt/x"]);
+  assert.deepEqual(d.withSaved([], {}), []);
+  assert.equal(d.hasTarget(["--dir", "/x", "--no-open"]), false);
+  // A tampered config file is still validated like a command-line argument.
+  const exit = process.exit, error = console.error;
+  process.exit = code => { throw new Error("exit " + code); };
+  console.error = () => {};
+  try { assert.throws(() => d.parseArgs(d.withSaved([], { target: "-oProxyCommand=x" })), /exit 2/); }
+  finally { process.exit = exit; console.error = error; }
+});
+
 test("snapshot parsing reads every section of admin.sh output", () => {
   const snap = d.parseSnapshot(SNAPSHOT);
   assert.equal(snap.gateway.users[0].user, "owner");

@@ -98,7 +98,7 @@ Both scripts reload Caddy through its admin socket inside the container (`/run/c
 | Create backup | `./backup.sh` (scheduled daily by installer where cron is available) |
 | Restore | `./restore.sh backups/state-<date>.tar.gz.enc` |
 | Gateway extension downloads | `https://<domain>/__ext/` behind gateway authentication |
-| Update | Follow the release instructions and preserve `.env`, cookie files, Caddy data, and backup keys |
+| Update | In the repository clone on the server: `git pull && bash install.sh` (Enter accepts the current settings). It keeps `.env`, users, cookie jars, backups and the backup key, restarts the gateway and front door so the new code runs, and reloads Caddy. Check with `docker compose ps` and `./admin.sh status 5`. |
 
 The CONNECT token expires after 15 minutes and refreshes while the gateway remains reachable. Certificate or gateway failure intentionally leaves artifact requests blocked. Unknown CDN hosts and Claude/API WebSocket paths are not arbitrary proxy fallbacks.
 

@@ -6,13 +6,18 @@
 //
 //   node dashboard/dashboard.js root@203.0.113.10 [--dir /root/claude-browser] [--port 8790] [--no-open]
 //
+// The server address is remembered in ~/.config/claude-gateway/dashboard.json;
+// later runs (or dashboard/start.command) need no arguments.
+//
 // The page listens on 127.0.0.1 only and every API call needs a random
 // per-launch token. Generated passwords pass through memory once; they are
 // never logged or written anywhere.
 "use strict";
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const readline = require("readline");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 
@@ -30,6 +35,39 @@ function usage(message) {
   if (message) console.error("Error: " + message);
   console.error("Usage: node dashboard/dashboard.js <ssh-destination> [--dir /root/claude-browser] [--port 8790] [--no-open]");
   process.exit(2);
+}
+
+const OPTIONS_WITH_VALUE = new Set(["--dir", "--port", "--interval"]);
+function hasTarget(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    if (OPTIONS_WITH_VALUE.has(argv[i])) i++;
+    else if (!argv[i].startsWith("-")) return true;
+  }
+  return false;
+}
+// Adds the remembered server unless one is given; parseArgs validates it.
+function withSaved(argv, saved) {
+  if (hasTarget(argv) || !saved || typeof saved.target !== "string" || !saved.target) return argv;
+  const dir = typeof saved.dir === "string" && saved.dir && !argv.includes("--dir") ? ["--dir", saved.dir] : [];
+  return [saved.target, ...dir, ...argv];
+}
+const configFile = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-gateway", "dashboard.json");
+function loadSaved() {
+  try { const d = JSON.parse(fs.readFileSync(configFile(), "utf8")); return d && typeof d === "object" ? d : {}; } catch (_) { return {}; }
+}
+function saveTarget(opts) {
+  try {
+    fs.mkdirSync(path.dirname(configFile()), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(configFile(), JSON.stringify({ target: opts.target, dir: opts.dir }, null, 2) + "\n", { mode: 0o600 });
+  } catch (_) { /* remembering is a convenience */ }
+}
+// One interface for all questions: answers typed ahead are not lost.
+async function askAll(questions) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answers = [];
+  try { for (const q of questions) answers.push((await new Promise(resolve => rl.question(q, resolve))).trim()); }
+  finally { rl.close(); }
+  return answers;
 }
 
 function parseArgs(argv) {
@@ -159,8 +197,8 @@ function runAdmin(opts, words, timeoutMs = 90000) {
   });
 }
 
-function startWatcher(opts, state) {
-  let child = null, buffer = "", delay = 2000, stopped = false, retry = null;
+function startWatcher(opts, state, onFirstError) {
+  let child = null, buffer = "", delay = 2000, stopped = false, retry = null, reported = false;
   const connect = () => {
     if (stopped) return;
     buffer = "";
@@ -184,6 +222,7 @@ function startWatcher(opts, state) {
     child.on("close", code => {
       state.connected = false;
       state.error = lastLine(stderr) || "ssh exited with code " + code;
+      if (!reported && onFirstError) { reported = true; onFirstError(state.error); }
       if (!stopped) retry = setTimeout(connect, delay);
       delay = Math.min(delay * 2, 30000);
     });
@@ -287,12 +326,23 @@ function openBrowser(url) {
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
+  let argv = withSaved(process.argv.slice(2), loadSaved());
+  if (!hasTarget(argv) && process.stdin.isTTY && !argv.some(a => a === "-h" || a === "--help")) {
+    console.log("Панель шлюза Claude: первый запуск.");
+    const [target, dir] = await askAll(["SSH-адрес сервера (например root@203.0.113.10): ", "Каталог установки на сервере [/root/claude-browser]: "]);
+    argv = [target, ...(dir ? ["--dir", dir] : []), ...argv];
+  }
+  const opts = parseArgs(argv);
+  saveTarget(opts);
   const state = createState();
   const token = crypto.randomBytes(24).toString("base64url");
   const server = createDashboardServer(opts, state, token);
   await listen(server, opts);
-  const watcher = startWatcher(opts, state);
+  const watcher = startWatcher(opts, state, error => {
+    console.error("SSH: " + error);
+    if (/permission denied|publickey/i.test(error)) console.error("Нужен вход по ключу: выполните ssh-copy-id " + opts.target + " и запустите панель снова.");
+    else if (/admin\.sh|no such file/i.test(error)) console.error("На сервере нет admin.sh: обновите сервер (git pull && bash install.sh) или укажите --dir.");
+  });
   const url = "http://127.0.0.1:" + opts.port + "/#token=" + token;
   console.log("Claude gateway dashboard for " + opts.target + ":" + opts.dir);
   console.log("Open: " + url);
@@ -302,6 +352,6 @@ async function main() {
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
 }
 
-module.exports = { parseArgs, parseSnapshot, parseContainer, createState, absorb, publicState, createDashboardServer, sshArgs, runAdmin, startWatcher };
+module.exports = { parseArgs, hasTarget, withSaved, parseSnapshot, parseContainer, createState, absorb, publicState, createDashboardServer, sshArgs, runAdmin, startWatcher };
 
 if (require.main === module) main().catch(e => { console.error("Error: " + e.message); process.exit(1); });
