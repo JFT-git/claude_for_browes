@@ -1,5 +1,10 @@
 # Публикация расширений в Chrome Web Store и Firefox AMO
 
+**Где опубликовано сейчас:**
+
+- Chrome Web Store: [Gateway Connector for Claude](https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif), ID `gimbjmikcifpmiiohgpehkkcknkcccif`. Версия 2.0.9 прошла проверку в октябре 2026.
+- Firefox: подписанный в AMO (unlisted) `.xpi` в [GitHub-релизах](https://github.com/JFT-git/claude_for_browes/releases/latest), автообновление через `updates.json`.
+
 Пользователи жалуются на безопасность: расширение unsigned, Chrome ругается «Отключите режим разработчика», Firefox — «не проверено». Решение — опубликовать в официальных магазинах. После этого:
 
 - **Chrome/Edge**: ставится в один клик из Chrome Web Store, без режима разработчика.
@@ -18,7 +23,7 @@
 3. **Account → Developer → Add new item → Extension**, заполните поля (текст ниже).
 4. **Upload a zip**: `releases/claude-gateway-chrome-v1.7.0.zip` (см. Шаг 2 — как собрать).
 5. **Visibility**: Unlisted (только по прямой ссылке).
-6. Сохраните **Item ID** (начинается с `chrome-extension://...`).
+6. Сохраните **Item ID**: 32 латинские буквы, например `gimbjmikcifpmiiohgpehkkcknkcccif`.
 
 ### Firefox AMO
 
@@ -219,7 +224,7 @@ npx web-ext sign --source-dir extension/dist/firefox \
 3. **Credentials → Create credentials → OAuth client ID** → тип **Web application**. В Authorized redirect URIs добавьте `https://developers.google.com/oauthplayground`. Сохраните **Client ID** и **Client secret**.
 4. Откройте [OAuth Playground](https://developers.google.com/oauthplayground). Шестерёнка справа сверху → **Use your own OAuth credentials** → вставьте Client ID и secret. В поле scope впишите `https://www.googleapis.com/auth/chromewebstore` → **Authorize APIs** (войдите тем Google-аккаунтом, которым владеете магазином) → **Exchange authorization code for tokens**. Скопируйте **Refresh token**.
 5. **Publisher ID** — в [DevConsole](https://chrome.google.com/webstore/devconsole/) → Account → Publisher settings.
-6. **Extension ID** карточки «Gateway Connector for Chrome» — `gimbjmikcifpmiiohgpehkkcknkcccif` (страница пакета, поле «Идентификатор»).
+6. **Extension ID** карточки «Gateway Connector for Claude» — `gimbjmikcifpmiiohgpehkkcknkcccif` (страница пакета, поле «Идентификатор»).
 
 Секреты репозитория (Settings → Secrets and variables → Actions → New repository secret):
 
@@ -267,14 +272,14 @@ Firefox у пользователей будет обновляться авто
 
 ## Чек-лист
 
-- [ ] Аккаунт Google-разработчика ($5)
-- [ ] Аккаунт AMO
+- [x] Аккаунт Google-разработчика ($5)
+- [x] Аккаунт AMO
 - [ ] `./configure.sh <домен>` — пакеты собраны
 - [ ] `grep "__GATEWAY" releases/*.zip` — плейсхолдеров нет
-- [ ] Chrome: поля заполнены, zip загружен в Web Store (unlisted)
+- [x] Chrome: поля заполнены, zip загружен в Web Store, проверка пройдена
 - [ ] Firefox: поля заполнены, zip загружен в AMO (unlisted)
-- [ ] Firefox: `npx web-ext sign` — подписаный `.xpi` получен
-- [ ] Ссылки установки добавлены в README
+- [x] Firefox: `npx web-ext sign` — подписанный `.xpi` получен
+- [x] Ссылки установки добавлены в README
 
 ## Безопасность
 

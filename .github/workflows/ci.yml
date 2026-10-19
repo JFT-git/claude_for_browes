@@ -135,7 +135,7 @@ jobs:
           V="${{ steps.ver.outputs.version }}"
           awk -v v="$V" 'found && /^## / { exit } found { print } $0 == "## " v || index($0, "## " v " ") == 1 { found = 1 }' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
           grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md" || { echo "CHANGELOG.md has no entry for $V"; exit 1; }
-          printf '\n---\n%s\n' "Signed Firefox Desktop add-on and Chrome package. Use a dedicated Chrome profile; Firefox restricts only Claude traffic and works in the everyday profile. Open Options, enter the gateway and credentials, and grant gateway access. See SECURITY.md for tested scenarios and limitations." >> "$RUNNER_TEMP/release-notes.md"
+          printf '\n---\n%s\n' "Chrome and Edge: install from the Chrome Web Store (https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif); it updates itself. Signed Firefox Desktop add-on and Chrome package for manual installs. Use a dedicated Chrome profile; Firefox restricts only Claude traffic and works in the everyday profile. Open Options, enter the gateway and credentials, and grant gateway access. See SECURITY.md for tested scenarios and limitations." >> "$RUNNER_TEMP/release-notes.md"
       - name: Sign Firefox add-on on AMO (unlisted)
         env:
           AMO_API_KEY: ${{ secrets.AMO_API_KEY }}

@@ -30,6 +30,10 @@
 
 - Исправлено: при обновлении `install.sh` копировал новые `gateway.js` и `port443-mux.py`, но не перезапускал их, и до ручного перезапуска работал старый код. Теперь установщик перезапускает шлюз и front door и перечитывает Caddyfile. Порядок обновления описан в README, раздел «Обновление сервера».
 
+### Chrome Web Store
+
+- Расширение 2.0.9 прошло проверку и опубликовано в [Chrome Web Store](https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif). Chrome и Edge ставят его без режима разработчика и обновляют сами. Ссылка добавлена в README, в инструкцию клиента и на страницу `https://<домен>/__ext/`. Zip для ручной установки остаётся. Распакованную копию перед установкой из магазина нужно удалить, а настройки ввести заново.
+
 ### Обновление
 
 - Нужны новые `gateway.js`, `admin.sh`, `add-user.sh`, `remove-user.sh`, `install-lib.sh`, `compose.yaml` (tmpfs `/run/caddy` для Caddy) и Caddyfile из нового шаблона. `install.sh` ставит всё это сам. Caddy после обновления нужно один раз пересоздать: `docker compose up -d`.

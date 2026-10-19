@@ -145,4 +145,4 @@ reload_caddy
 docker compose ps
 CODE_NOAUTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 "https://$DOMAIN/__health" || true)
 echo "/__health без пароля: $CODE_NOAUTH (ожидаем 401; первая выдача сертификата может занять время)."
-printf 'Готово: https://%s/\nРасширения: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\nПанель на своём компьютере: dashboard/start.command или node dashboard/dashboard.js root@<сервер> (docs/DASHBOARD.md)\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"
+printf 'Готово: https://%s/\nРасширение для Chrome и Edge: https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif\nДругие сборки: https://%s/__ext/\nУправление пользователями: ./add-user.sh / ./remove-user.sh в %s\nПанель на своём компьютере: dashboard/start.command или node dashboard/dashboard.js root@<сервер> (docs/DASHBOARD.md)\n' "$DOMAIN" "$DOMAIN" "$DEPLOY_DIR"

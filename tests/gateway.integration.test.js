@@ -177,6 +177,7 @@ test("extension download page describes setup and only links an available signed
     const page = async () => (await request("/__ext/", { headers: { "x-remote-user": "test-user" } })).body.toString();
     const absent = await page();
     for (const text of ["расширение " + extensionVersion, "≥ 125", "≥ 140", "Options", "не привязаны к домену", "во всём профиле", "fail-closed", "hard reload", "debugger", "баннер отладки", "DevTools"]) assert.ok(absent.includes(text), text);
+    assert.match(absent, /href="https:\/\/chromewebstore\.google\.com\/detail\/[a-z-]+\/gimbjmikcifpmiiohgpehkkcknkcccif"/);
     assert.doesNotMatch(absent, /href="\/__ext\/gateway-connector-firefox\.xpi"/);
     fs.writeFileSync(xpi, "synthetic signed package fixture");
     assert.match(await page(), /href="\/__ext\/gateway-connector-firefox\.xpi"/);
