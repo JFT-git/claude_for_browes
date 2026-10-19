@@ -866,6 +866,7 @@ function cachePut(k, e) {
 
 // ------------------------------------------------ extension download page ----
 
+const CHROME_WEB_STORE = "https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif";
 const EXT_FILES = { "claude-gateway-chrome.zip": "application/zip", "claude-gateway-firefox.zip": "application/zip", "gateway-connector-firefox.xpi": "application/x-xpinstall" };
 
 function extIndexHtml() {
@@ -876,13 +877,14 @@ function extIndexHtml() {
     '<body style="font-family:-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5">' +
     '<h2>Claude Gateway — расширение 2.0.9</h2>' +
     '<p>Создайте отдельный профиль браузера только для шлюза. При активной защите другие внешние сайты и запросы блокируются во всём профиле, включая новые окна и фоновые процессы.</p><ul>' +
-    '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge ≥ 125 (zip)</a> — скачайте свежую сборку, распакуйте, откройте <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное».</li>' +
+    '<li><a href="' + CHROME_WEB_STORE + '" rel="noopener noreferrer">Chrome / Edge ≥ 125 — Chrome Web Store</a> — установка в один щелчок, обновления приходят сами. Edge попросит разрешить расширения из других магазинов. Если раньше ставили распакованную сборку, сначала удалите её на <code>chrome://extensions</code>.</li>' +
+    '<li><a href="/__ext/claude-gateway-chrome.zip">Chrome / Edge ≥ 125 (zip)</a> — без магазина: распакуйте, откройте <code>chrome://extensions</code> → режим разработчика → «Загрузить распакованное».</li>' +
     '<li><a href="/__ext/claude-gateway-firefox.zip">Firefox ≥ 140 (zip, без подписи)</a> — сборка для проверки. Защищённый маршрут артефактов пока не поддерживается и блокирует запросы (fail-closed); полноценная работа файлов и артефактов не подтверждена.</li>' +
     (signedFirefox ? '<li><a href="/__ext/gateway-connector-firefox.xpi">Firefox ≥ 140 (подписанный .xpi)</a> — те же ограничения защищённого маршрута.</li>' : '<li>Подписанный Firefox XPI на этом сервере отсутствует.</li>') + '</ul>' +
     '<p>Сборки не привязаны к домену. В настройках расширения (Options) введите домен шлюза <code>' + h + '</code>, ваш логин и пароль, затем нажмите «Сохранить и разрешить».</p>' +
     '<p>Chrome запрашивает разрешение debugger для защищённого маршрута и совместимости артефактов; при подключении появится баннер отладки браузера. DevTools может конфликтовать с подключением расширения: закройте DevTools перед работой, а при потере защиты переподключите расширение и проверьте его статус.</p>' +
     '<p>Inline-preview артефактов, которым требуется изменение CSP-заголовков, ограничен body 8 MiB. Файлы с <code>Content-Disposition: attachment</code> идут через штатную загрузку браузера без этого буфера; поддержка каждого типа загрузки не гарантируется.</p>' +
-    '<p>После обновления расширения перезагрузите его на странице расширений и сделайте hard reload страницы Claude: Ctrl+Shift+R или ⌘+Shift+R. Перед работой проверьте в расширении, что защищённый маршрут активен.</p></body>';
+    '<p>После обновления расширения сделайте hard reload страницы Claude: Ctrl+Shift+R или ⌘+Shift+R. Распакованную сборку перед этим перезагрузите на странице расширений. Перед работой проверьте в расширении, что защищённый маршрут активен.</p></body>';
 }
 
 function serveExt(req, res) {

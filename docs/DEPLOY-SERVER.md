@@ -85,7 +85,7 @@ Run management commands from the deploy directory:
 ./admin.sh status
 ```
 
-The first command generates a gateway password and prints it once. The user installs the current Chromium package from `https://<domain>/__ext/`, creates a dedicated browser profile, enters the gateway host/user/password, and completes Claude sign-in. Firefox 140+ packages exist, but secure artifact CONNECT is disabled there; do not offer Firefox as a full-parity client.
+The first command generates a gateway password and prints it once. The user installs the extension from the [Chrome Web Store](https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif) (or an unpacked package from `https://<domain>/__ext/`), creates a dedicated browser profile, enters the gateway host/user/password, and completes Claude sign-in. Firefox 140+ packages exist, but secure artifact CONNECT is disabled there; do not offer Firefox as a full-parity client.
 
 Both scripts reload Caddy through its admin socket inside the container (`/run/caddy/admin.sock`, tmpfs) instead of restarting it. Removal revokes only that user's proxy sessions, tunnels and WebSockets through the gateway's loopback-only operator API and deletes their cookie jar; other users stay connected. Resetting a password ends the user's tunnels and WebSockets; their Claude session survives only while the gateway still holds their jar key (activity within the last hour). For a dashboard with users and load, see [DASHBOARD.md](DASHBOARD.md).
 

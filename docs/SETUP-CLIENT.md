@@ -4,7 +4,7 @@
 
 ## Что получить от администратора
 
-- Ссылку на актуальную сборку расширения или папку `extension/dist/chrome`
+- Ссылку на расширение в [Chrome Web Store](https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif). Для Firefox — подписанный `.xpi` с `https://<gateway-host>/__ext/`
 - Gateway host, например `claude.example.com`
 - Персональные gateway username и password
 
@@ -16,11 +16,11 @@ Gateway password — отдельный пароль для входа в шлю
 
 ## Установите и настройте расширение
 
-Используйте расширение версии 2.0.5 или новее. Minimum Chrome version — 125 из-за поддержки OOPIF в debugger API. Установите актуальную Chromium-сборку с `https://<gateway-host>/__ext/` или получите её у администратора:
+Используйте расширение версии 2.0.5 или новее. Minimum Chrome version — 125 из-за поддержки OOPIF в debugger API.
 
-1. Откройте `chrome://extensions` или `edge://extensions`.
-2. Включите **Developer mode** и нажмите **Load unpacked**.
-3. Для исходников выберите `extension/dist/chrome`. Если скачали zip с сервера, распакуйте его и выберите распакованную папку, где находится `manifest.json`.
+1. В выделенном профиле откройте [страницу расширения в Chrome Web Store](https://chromewebstore.google.com/detail/gateway-connector-for-cla/gimbjmikcifpmiiohgpehkkcknkcccif) и нажмите **Установить**. Edge сначала попросит разрешить расширения из других магазинов. Обновления Chrome ставит сам.
+2. Если расширение раньше стояло через **Load unpacked**, удалите старую копию на `chrome://extensions` или `edge://extensions`: две копии одновременно мешают друг другу. У версии из магазина свои настройки, введите их заново.
+3. Без магазина: `chrome://extensions` → **Developer mode** → **Load unpacked**. Выберите `extension/dist/chrome` или распакованный zip с `https://<gateway-host>/__ext/` — папку, где находится `manifest.json`.
 4. Откройте настройки расширения и введите host без `https://` и пути, username и password.
 5. Нажмите **Сохранить и разрешить** и подтвердите запрошенные origin permissions.
 6. Chromium-пакет требует разрешение `debugger`; Chrome показывает соответствующее предупреждение при установке. Оно нужно для ограниченной совместимости artifact iframe. Chrome также показывает системный баннер отладки, пока подключена вкладка шлюза — это ожидаемо.
@@ -30,7 +30,7 @@ Gateway password — отдельный пароль для входа в шлю
 
 Перед открытием artifact-маршрута Chromium проверяет фиксированный HTTPS `HEAD` без тела к jsDelivr через CONNECT и должен получить успешный proxy-auth callback. Redirect запрещён, таймаут — 8 секунд. Пока проверка не завершилась, artifact requests остаются заблокированными; в popup может отображаться состояние проверки. Это служебный запрос к заданному CDN URL, а не передача содержимого страницы.
 
-После обновления расширения перезагрузите его на странице управления extensions и сделайте hard reload в Claude (`Cmd+Shift+R` на Mac), чтобы убрать старые скрипты из вкладки.
+После обновления расширения сделайте hard reload в Claude (`Cmd+Shift+R` на Mac), чтобы убрать старые скрипты из вкладки. Распакованную копию перед этим перезагрузите на странице управления extensions; версию из магазина Chrome перезапускает сам.
 
 ## Firefox Desktop
 
