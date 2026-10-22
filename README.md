@@ -210,8 +210,8 @@ docker compose ps        # все три контейнера Up, caddy — heal
 Откройте `https://claude.ai` в этом профиле. Он загрузится через шлюз с уже авторизованной сессией.
 
 - Claude работает в браузере клиента; поддерживаемые артефакты могут открываться через отдельный CONNECT tunnel.
-- В Chromium подходящие artifact responses обрабатываются через `chrome.debugger` только в точном профиле/вкладках gateway: расширение добавляет gateway origin в `frame-ancestors`, сохраняя остальные CSP-политики. Firefox-кандидат использует native proxy и header handling без Chrome debugger и без чтения/буферизации тела; его gateway-owned frame/CORS-правила и поддержка ожидают native-проверки. Совместимость preview зависит от страницы; в Chromium DevTools может занять debugger и привести к fail-closed блокировке артефакта.
-- В Chromium inline artifact response, для которого нужно менять заголовки, ограничен буфером 8 MiB; attachment-загрузки проходят по штатному download-пути браузера без буферизации этим механизмом. Firefox-кандидат использует native header path без чтения тела. Успешная работа каждого типа артефакта, загрузки и OAuth не гарантирована; известные ограничения перечислены в [SECURITY.md](SECURITY.md).
+- В Chromium подходящие artifact responses обрабатываются через `chrome.debugger` только в точном профиле/вкладках gateway: расширение добавляет gateway origin в `frame-ancestors`, сохраняя остальные CSP-политики. Firefox использует native proxy и обработку заголовков без Chrome debugger и без чтения/буферизации тела. Совместимость preview зависит от страницы; в Chromium DevTools может занять debugger и привести к fail-closed блокировке артефакта.
+- В Chromium inline artifact response, для которого нужно менять заголовки, ограничен буфером 8 MiB; attachment-загрузки проходят по штатному download-пути браузера без буферизации этим механизмом. Firefox использует native header path без чтения тела. Успешная работа каждого типа артефакта, загрузки и OAuth не гарантирована; известные ограничения перечислены в [SECURITY.md](SECURITY.md).
 
 ---
 

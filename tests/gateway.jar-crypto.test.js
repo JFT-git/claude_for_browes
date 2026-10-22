@@ -35,9 +35,10 @@ test("jars are sealed with the user's password key and never hold plaintext", as
   assert.equal(doc.enc, 2, "a fresh plain jar is re-sealed on the first request");
   assert.equal(doc.user, "alice");
   assert.equal(doc.kdf.name, "scrypt"); assert.equal(doc.kdf.N, 32768); assert.equal(Buffer.from(doc.kdf.salt, "base64").length, 16);
-  assert.ok(g.captureSetCookies("alice", ["sessionKey=SECRET-SESSION; Path=/; Max-Age=3600", "lastActiveOrg=ORG; Path=/"]));
+  assert.ok(g.captureSetCookies("alice", ["sessionKey=SECRET-SESSION; Path=/; Max-Age=3600", "lastActiveOrg=ORG-VALUE; Path=/"]));
   const raw = read("alice");
-  assert.ok(!raw.includes("SECRET-SESSION") && !raw.includes("ORG"), "cookie values on disk");
+  // "-" is outside the base64 alphabet, so random ciphertext cannot match by chance.
+  assert.ok(!raw.includes("SECRET-SESSION") && !raw.includes("ORG-VALUE"), "cookie values on disk");
   doc = JSON.parse(raw);
   assert.equal(doc.meta.session, true); assert.equal(doc.meta.cookies, 2);
   assert.equal(fs.statSync(file("alice")).mode & 0o777, 0o600);
